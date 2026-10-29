@@ -11,7 +11,7 @@ import { finalizeOfficialCcTelemetry, officialCcHome } from '../src/lib/oauth/of
 import { readOfficialCcIdentity } from '../src/lib/identity/official-fingerprint.mjs'
 import { listVms, getVm } from '../src/lib/vm/vm-registry.mjs'
 import { containerName } from '../src/lib/vm/vm-runtime.mjs'
-import { runFleetUpdate } from '../src/lib/vm/fleet-update.mjs'
+import { runFleetUpdateWithDatabase as runFleetUpdate } from '../src/lib/vm/fleet-cli.mjs'
 
 const ROOT = process.argv.find((a) => a.startsWith('--root='))?.slice(7) || '/opt/kin-gateway'
 const DRY = process.argv.includes('--dry')

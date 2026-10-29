@@ -5,6 +5,9 @@ import os from 'node:os'
 import net from 'node:net'
 import path from 'node:path'
 import { runFleetUpdate, fleetStatus, isWorkerProcessUp, restartLocalEgress } from '../../src/lib/vm/fleet-update.mjs'
+import { runFleetUpdateWithDatabase } from '../../src/lib/vm/fleet-cli.mjs'
+import { createDatabase } from '../../src/lib/db/database.mjs'
+import { SettingsRepo } from '../../src/lib/db/repos/settings-repo.mjs'
 import { startEgressProcess, inspectEgressProcess } from '../../src/lib/vm/egress.mjs'
 
 function writeSlot(root, id, extra = {}) {
@@ -165,6 +168,10 @@ test('fleet refresh replaces an egress process whose binary was deleted', {
   fs.chmodSync(newBin, 0o755)
   const proxy = { id: 'px-fleet', scheme: 'socks5', host: '192.0.2.1', port: 1080, url: 'socks5://192.0.2.1:1080' }
   writeSlot(root, 'vm-01', { proxy })
+  const db = createDatabase({ dataDir: path.join(root, 'data') })
+  db.prepare('INSERT INTO proxies (id, domain_forward) VALUES (?, ?)').run(proxy.id, 1)
+  new SettingsRepo(db).set('proxy_pool_config', { dns_primary: 'https://cloudflare-dns.com/dns-query' })
+  db.close()
   const probe = net.createServer()
   const port = await new Promise((resolve) => probe.listen(0, '127.0.0.1', () => resolve(probe.address().port)))
   await new Promise((resolve) => probe.close(resolve))
@@ -191,7 +198,7 @@ test('fleet refresh replaces an egress process whose binary was deleted', {
     bin: newBin,
   }
   try {
-    const report = await runFleetUpdate(root, {
+    const report = await runFleetUpdateWithDatabase(root, {
       action: 'telemetry',
       telemetryFn: async ({ projectRoot, vm }) => restartLocalEgress(projectRoot, vm, egressOpts),
       healthFn: async () => ({ ok: true }),
@@ -202,10 +209,10 @@ test('fleet refresh replaces an egress process whose binary was deleted', {
     assert.notEqual(current.pid, orphan.pid)
     assert.equal(fs.readlinkSync(`/proc/${current.pid}/exe`), newBin)
     assert.equal(fs.existsSync(`/proc/${orphan.pid}`), false)
-    assert.equal(
-      JSON.parse(fs.readFileSync(path.join(root, 'data/run/egress/px-fleet/egress.json'), 'utf8')).listen_tcp,
-      `127.0.0.1:${port}`,
-    )
+    const config = JSON.parse(fs.readFileSync(path.join(root, 'data/run/egress/px-fleet/egress.json'), 'utf8'))
+    assert.equal(config.listen_tcp, `127.0.0.1:${port}`)
+    assert.equal(config.domain_forward, true)
+    assert.match(config.dns_upstream, /^https:\/\/cloudflare-dns\.com\/dns-query,/)
     process.kill(current.pid, 'SIGTERM')
   } finally {
     if (previous === undefined) delete process.env.KIN_EGRESS_BIN
