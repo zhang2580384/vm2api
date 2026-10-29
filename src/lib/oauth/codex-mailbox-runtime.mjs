@@ -204,7 +204,8 @@ export async function runMailboxSlotProcess(
     // An authorization code is single-use and short-lived. Preserve it so the
     // service can commit credentials before reporting a separate cleanup issue.
     if (result?.callback) return { ...result, resource_cleanup_error_code: 'browser_resources_failed' }
-    failure ||= error
+    if (failure) failure.resource_cleanup_error_code = 'browser_resources_failed'
+    else failure = error
   }
   if (failure) throw failure
   return result
@@ -220,6 +221,7 @@ function runMailboxProcess({
   onControl,
   onEvent,
   onCheckpoint,
+  onCallback,
   spawnImpl = spawn,
 }) {
   if (signal?.aborted) return Promise.reject(mailboxError('login_cancelled', 409))
@@ -254,6 +256,7 @@ function runMailboxProcess({
     const child = spawnImpl('docker', argv, { env: host.dockerEnv() || process.env, stdio: ['pipe', 'pipe', 'pipe'] })
     let buffer = '',
       callback = '',
+      callbackTask = Promise.resolve(),
       result = null,
       errorCode = '',
       finished = false,
@@ -272,11 +275,16 @@ function runMailboxProcess({
         killTimer.unref?.()
       }
     }
-    const timer = setTimeout(
-      abort,
-      action === 'prepare' ? 15 * 60_000 : ['remote', 'register'].includes(action) ? 31 * 60_000 : 520_000,
-    )
-    timer.unref?.()
+    // Manual remote windows belong to the operator. Authorization windows keep
+    // their login timeout until credentials have actually been committed.
+    const timer =
+      action === 'remote' && payload?.keep_open
+        ? null
+        : setTimeout(
+            abort,
+            action === 'prepare' ? 15 * 60_000 : ['remote', 'register'].includes(action) ? 31 * 60_000 : 520_000,
+          )
+    timer?.unref?.()
     signal?.addEventListener('abort', abort, { once: true })
     onControl?.(send)
     child.stdin.on('error', () => {})
@@ -302,7 +310,22 @@ function runMailboxProcess({
           if (event.stage === 'failed' && /^[a-z_]{1,60}$/.test(event.code || '')) errorCode = event.code
           onStage?.(event.stage)
         }
-        if (event.event === 'callback' && typeof event.callback_url === 'string') callback = event.callback_url
+        if (event.event === 'callback' && typeof event.callback_url === 'string' && !callback) {
+          callback = event.callback_url
+          if (onCallback) {
+            callbackTask = Promise.resolve()
+              .then(() => onCallback({ callback, native: payload?.native === true }))
+              .then(() => {
+                if (payload?.keep_open) clearTimeout(timer)
+              })
+              .catch((error) => {
+                errorCode = /^[a-z_]{1,60}$/.test(error.code || '') ? error.code : 'browser_login_failed'
+                abort()
+                throw mailboxError(errorCode, 502)
+              })
+            callbackTask.catch(() => {})
+          }
+        }
         if (event.event === 'prepared') prepared = event.ok === true
         if (event.event === 'result' && ['session', 'subscription', 'register'].includes(action)) result = event.data
         if (event.event === 'registration_checkpoint' && action === 'register') {
@@ -328,7 +351,12 @@ function runMailboxProcess({
       error ? reject(error) : resolve(value)
     }
     child.on('error', () => complete(mailboxError('slot_exec_failed', 502)))
-    child.on('close', (code) => {
+    child.on('close', async (code) => {
+      try {
+        await callbackTask
+      } catch (error) {
+        return complete(error)
+      }
       if (signal?.aborted || code === 130) return complete(mailboxError('login_cancelled', 409))
       if (code !== 0)
         return complete(

@@ -452,7 +452,7 @@ for (const reason of ['no_credential', 'oauth_invalid_grant', 'credential_refres
   }
 }
 
-test('successful native authorization commits before uninstall and keeps the slot resting', async (t) => {
+test('successful native authorization saves credentials without uninstalling and keeps the slot resting', async (t) => {
   const sequence = []
   const h = harness(t, {
     runSlot: async ({ action, payload }) => {
@@ -469,23 +469,78 @@ test('successful native authorization commits before uninstall and keeps the slo
   h.vm.schedulable = false
   h.service.start('vm-01')
   await h.service.settle()
-  assert.deepEqual(sequence, ['commit', 'uninstall'])
+  assert.deepEqual(sequence, ['commit'])
   assert.equal(h.service.status('vm-01').state.status, 'succeeded')
   assert.equal(h.store.summary('vm-01').configured, true)
   assert.equal(h.vm.schedulable, false)
 })
 
-test('uninstall failure cannot erase successful native authorization', async (t) => {
+test('authorized native window stays controllable until explicit close, then supports manual uninstall', async (t) => {
+  let authorized
+  const ready = new Promise((resolve) => {
+    authorized = resolve
+  })
+  const actions = []
   const h = harness(t, {
-    runSlot: async ({ action }) =>
-      action === 'prepare'
-        ? { ok: true }
-        : {
-            callback: 'http://localhost:1455/auth/callback?code=mock&state=test-state',
-            native: true,
-          },
-    manageRuntime: async () => {
-      throw mailboxError('browser_uninstall_failed', 502)
+    runSlot: async ({ action, payload, onCallback, onControl, onEvent, signal }) => {
+      if (action === 'prepare') return { ok: true }
+      assert.equal(payload.keep_open, true)
+      onControl((request) => {
+        onEvent({ event: 'rpc', id: request.id, ok: true, data: { ok: true } })
+      })
+      await onCallback({ callback: 'http://localhost:1455/auth/callback?code=mock&state=test-state', native: true })
+      authorized()
+      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+      throw mailboxError('login_cancelled', 409)
+    },
+    manageRuntime: async ({ action }) => {
+      actions.push(action)
+      return { installed: action !== 'uninstall', supported: true }
+    },
+  })
+  h.vm.schedulable = false
+  h.service.start('vm-01')
+  await ready
+  const active = h.service.status('vm-01')
+  assert.equal(active.state.status, 'succeeded')
+  assert.equal(active.state.running, false)
+  assert.equal(active.browser.active, true)
+  assert.equal(active.browser.ready, true)
+  assert.equal(active.browser.retained, true)
+  h.service.guardJobs()
+  assert.equal(h.service.status('vm-01').browser.ready, true)
+  assert.deepEqual(await h.service.control('vm-01', { op: 'navigate', url: 'https://chatgpt.com/api/auth/session' }), {
+    ok: true,
+  })
+  assert.throws(() => h.service.runtime('vm-01', 'uninstall'), /mailbox_login_busy/)
+  assert.throws(() => h.service.save('vm-01', { email, password }), /mailbox_login_busy/)
+  assert.deepEqual(actions, [])
+  h.service.cancel('vm-01')
+  await h.service.settle()
+  const state = h.service.status('vm-01').state
+  assert.equal(state.status, 'succeeded')
+  assert.equal(state.error_code, null)
+  assert.equal(state.browser_error_code, null)
+  assert.equal(h.service.status('vm-01').browser.active, false)
+  assert.equal(h.store.summary('vm-01').configured, true)
+  assert.equal(h.store.summary('vm-01').login_armed, true)
+  assert.equal(h.vm.schedulable, false)
+  assert.deepEqual(actions, [])
+  h.service.runtime('vm-01', 'uninstall')
+  await h.service.settle()
+  assert.deepEqual(actions, ['uninstall'])
+  assert.equal(h.store.summary('vm-01').configured, true)
+  assert.equal(h.store.summary('vm-01').login_armed, true)
+})
+
+test('late browser cleanup errors preserve credentials committed by the live callback', async (t) => {
+  const h = harness(t, {
+    runSlot: async ({ action, onCallback }) => {
+      if (action === 'prepare') return { ok: true }
+      await onCallback({ callback: 'http://localhost:1455/auth/callback?code=mock&state=test-state', native: true })
+      throw Object.assign(mailboxError('browser_closed', 502), {
+        resource_cleanup_error_code: 'browser_resources_failed',
+      })
     },
   })
   h.service.start('vm-01')
@@ -493,8 +548,9 @@ test('uninstall failure cannot erase successful native authorization', async (t)
   const state = h.service.status('vm-01').state
   assert.equal(state.status, 'succeeded')
   assert.equal(state.error_code, null)
-  assert.equal(state.cleanup_error_code, 'browser_uninstall_failed')
-  assert.equal(h.store.summary('vm-01').configured, true)
+  assert.equal(state.browser_error_code, 'browser_closed')
+  assert.equal(state.cleanup_error_code, 'browser_resources_failed')
+  assert.equal(h.calls.filter((action) => action === 'commit').length, 1)
 })
 
 test('resource cleanup warning commits authorization and defers uninstalling a possibly live browser', async (t) => {

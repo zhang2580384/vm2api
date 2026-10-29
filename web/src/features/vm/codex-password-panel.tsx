@@ -39,6 +39,7 @@ export type LoginStatus = {
     ready: boolean
     remote: boolean
     native?: boolean
+    retained?: boolean
   }
   state: {
     running: boolean
@@ -46,6 +47,7 @@ export type LoginStatus = {
     stage: string
     error_code?: string
     cleanup_error_code?: string | null
+    browser_error_code?: string | null
     job_id?: string
   }
 }
@@ -79,8 +81,7 @@ export function CodexPasswordPanel({ vm }: { vm: Vm }) {
   useEffect(() => {
     const signature =
       status.data?.state.status === 'succeeded' &&
-      status.data.state.stage === 'completed' &&
-      !status.data.browser.active
+      status.data.state.stage === 'completed'
         ? status.data.state.job_id
         : ''
     if (!signature || notified.current === signature) return
@@ -126,6 +127,7 @@ export function CodexPasswordPanel({ vm }: { vm: Vm }) {
     }
   }
   const running = status.data?.state.running === true
+  const occupied = running || status.data?.browser.active === true
   const locked = busy || environmentBusy
   return (
     <div className='space-y-3 rounded border p-3'>
@@ -155,7 +157,7 @@ export function CodexPasswordPanel({ vm }: { vm: Vm }) {
           aria-label='选择账号池凭据'
           className='h-9 min-w-0 flex-1 rounded border bg-background px-2 text-sm'
           value={selected}
-          disabled={locked || running}
+          disabled={locked || occupied}
           onChange={(e) => setSelected(e.target.value)}
         >
           <option value=''>从账号池选择凭据</option>
@@ -181,7 +183,7 @@ export function CodexPasswordPanel({ vm }: { vm: Vm }) {
           disabled={
             !selected ||
             locked ||
-            running ||
+            occupied ||
             selected === status.data?.credential_id
           }
           onClick={() => void perform('bind')}
@@ -195,7 +197,7 @@ export function CodexPasswordPanel({ vm }: { vm: Vm }) {
           disabled={
             !status.data?.configured ||
             locked ||
-            running ||
+            occupied ||
             !slotRunning ||
             vm.can_import_credential === false
           }
@@ -207,32 +209,32 @@ export function CodexPasswordPanel({ vm }: { vm: Vm }) {
           key={vm.id}
           vm={vm}
           status={status.data}
-          locked={locked}
+          locked={locked || occupied}
         />
         {status.data?.configured && (
           <Button
             size='sm'
             variant='ghost'
-            disabled={locked || running}
+            disabled={locked || occupied}
             onClick={() => void perform('remove')}
           >
             解除绑定
           </Button>
         )}
-        {running && (
+        {occupied && (
           <Button
             size='sm'
             variant='outline'
             disabled={busy}
             onClick={() => void perform('cancel')}
           >
-            停止任务
+            {status.data?.browser.retained ? '关闭浏览器' : '停止任务'}
           </Button>
         )}
         <BrowserEnvironmentControls
           key={vm.id}
           vm={vm}
-          loginRunning={busy || running}
+          loginRunning={busy || occupied}
           onBusyChange={setEnvironmentBusy}
         />
       </div>
@@ -262,7 +264,13 @@ export function CodexPasswordPanel({ vm }: { vm: Vm }) {
               {status.data.state.cleanup_error_code ===
               'browser_resources_failed'
                 ? '授权已保存；临时资源恢复失败，已保留浏览器环境，请检查槽位资源状态。'
-                : '授权已保存；浏览器环境自动卸载失败，可稍后手动卸载。'}
+                : '授权已保存；浏览器清理出现异常，请检查槽位后再手动卸载。'}
+            </p>
+          )}
+          {status.data.state.browser_error_code && (
+            <p className='text-amber-600'>
+              授权已保存；浏览器已结束：
+              {loginLabel(status.data.state.browser_error_code)}
             </p>
           )}
         </div>

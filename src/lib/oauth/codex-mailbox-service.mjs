@@ -117,6 +117,7 @@ export function createCodexMailboxService({
         ready: !!jobs.get(id)?.send,
         remote: jobs.get(id)?.remote === true,
         native: jobs.get(id)?.native === true,
+        retained: jobs.get(id)?.authorized === true && jobs.get(id)?.native === true && !!jobs.get(id)?.send,
       },
       state: state || { running: false, status: 'idle', stage: 'idle' },
     }
@@ -194,6 +195,46 @@ export function createCodexMailboxService({
       const inner = outer.searchParams.get('authorize_url')
       const state = new URL(inner || outer).searchParams.get('state')
       if (!state) throw mailboxError('oauth_state_missing', 500)
+      const authorize = async (response) => {
+        if (entry.authorized) return
+        vm = stillAllowed(id, login.revision, controller.signal)
+        const callback = new URL(response.callback)
+        if (
+          callback.origin !== 'http://localhost:1455' ||
+          callback.pathname !== '/auth/callback' ||
+          callback.searchParams.get('state') !== state
+        )
+          throw mailboxError('oauth_state_mismatch', 409)
+        update(id, { stage: 'exchanging_code' })
+        const tokens = await exchange({ sessionId, code: response.callback, vmId: id, proxyUrl: hostProxyUrlForVm(vm) })
+        stillAllowed(id, login.revision, controller.signal)
+        await commitAccount(id, tokens, login.email, { automatic: entry.automatic })
+        store.arm(id)
+        // Arming rotates the binding revision. The retained browser still owns
+        // this same account, and must not be cancelled by its own revision change.
+        entry.revision = store.read(id).revision
+        entry.authorized = true
+        clearMailboxAuthFailure(projectRoot, id)
+        update(id, {
+          running: false,
+          stage: 'completed',
+          status: 'succeeded',
+          error_code: null,
+          browser_error_code: null,
+          cleanup_error_code: response.resource_cleanup_error_code || null,
+          last_success_at: new Date(now()).toISOString(),
+          finished_at: new Date(now()).toISOString(),
+          failures: 0,
+          next_attempt_at: null,
+        })
+        discardCodexAuthSession(sessionId)
+        sessionId = ''
+        try {
+          await onAuthorized(id)
+        } catch {
+          /* Credential commit has already succeeded. */
+        }
+      }
       update(id, { stage: 'opening_browser' })
       const response = await runSlot({
         projectRoot,
@@ -208,59 +249,35 @@ export function createCodexMailboxService({
           auth_url: auth.auth_url,
           state,
           native: entry.native === true,
+          keep_open: entry.native === true && !entry.automatic,
         },
-        onStage: (stage) => update(id, { stage }),
+        onStage: (stage) => {
+          if (!entry.authorized) update(id, { stage })
+        },
+        onCallback: entry.native === true && !entry.automatic ? authorize : undefined,
         onControl: (send) => {
           entry.send = send
         },
         onEvent: (event) => receive(entry, event),
       })
       entry.send = null
-      vm = stillAllowed(id, login.revision, controller.signal)
-      const callback = new URL(response.callback)
-      if (
-        callback.origin !== 'http://localhost:1455' ||
-        callback.pathname !== '/auth/callback' ||
-        callback.searchParams.get('state') !== state
-      ) {
-        throw mailboxError('oauth_state_mismatch', 409)
-      }
-      update(id, { stage: 'exchanging_code' })
-      const tokens = await exchange({ sessionId, code: response.callback, vmId: id, proxyUrl: hostProxyUrlForVm(vm) })
-      stillAllowed(id, login.revision, controller.signal)
-      await commitAccount(id, tokens, login.email, { automatic: entry.automatic })
-      store.arm(id)
-      clearMailboxAuthFailure(projectRoot, id)
-      update(id, {
-        running: false,
-        stage: 'completed',
-        status: 'succeeded',
-        error_code: null,
-        cleanup_error_code: response.resource_cleanup_error_code || null,
-        last_success_at: new Date(now()).toISOString(),
-        finished_at: new Date(now()).toISOString(),
-        failures: 0,
-        next_attempt_at: null,
-      })
-      try {
-        await onAuthorized(id)
-      } catch {
-        /* Credential commit has already succeeded. */
-      }
-      if (response.native === true && !response.resource_cleanup_error_code) {
-        // Commit credentials before removing executables. A cleanup failure
-        // must not turn successful authorization into a reported login failure.
-        update(id, { stage: 'uninstalling_browser' })
-        try {
-          const info = await manageRuntime({ projectRoot, vm, action: 'uninstall' })
-          runtimeStates.set(id, { ...info, running: false, stage: 'browser_runtime_removed' })
-          update(id, { stage: 'completed', cleanup_error_code: null })
-        } catch {
-          update(id, { stage: 'completed', cleanup_error_code: 'browser_uninstall_failed' })
-        }
-      }
+      await authorize(response)
+      if (response.resource_cleanup_error_code) update(id, { cleanup_error_code: response.resource_cleanup_error_code })
     } catch (error) {
       const code = /^[a-z_]{1,60}$/.test(error.code || '') ? error.code : 'browser_login_failed'
+      if (entry.authorized) {
+        // Closing a retained window, or a later browser failure, cannot erase
+        // an authorization that was already committed successfully.
+        update(id, {
+          running: false,
+          stage: 'completed',
+          status: 'succeeded',
+          error_code: null,
+          browser_error_code: controller.signal.aborted ? null : code,
+          cleanup_error_code: error.resource_cleanup_error_code || null,
+        })
+        return
+      }
       const previous = store.state(id) || {}
       const failures = (previous.failures || 0) + 1
       const attention = NEEDS_ATTENTION.has(code)
@@ -279,6 +296,7 @@ export function createCodexMailboxService({
       })
     } finally {
       if (sessionId) discardCodexAuthSession(sessionId)
+      entry.send = null
       closeRequests(entry)
       jobs.delete(id)
     }
@@ -313,6 +331,8 @@ export function createCodexMailboxService({
       stage: 'queued',
       automatic,
       error_code: null,
+      browser_error_code: null,
+      cleanup_error_code: null,
       started_at: new Date(now()).toISOString(),
       finished_at: null,
     })
@@ -569,7 +589,14 @@ export function createCodexMailboxService({
       revision: store.read(id)?.revision,
     }
     jobs.set(id, entry)
-    update(id, { running: true, status: 'running', stage: 'preparing_browser', error_code: null })
+    update(id, {
+      running: true,
+      status: 'running',
+      stage: 'preparing_browser',
+      error_code: null,
+      browser_error_code: null,
+      cleanup_error_code: null,
+    })
     entry.promise = Promise.resolve().then(async () => {
       try {
         await checkNetwork(vm)
@@ -583,7 +610,7 @@ export function createCodexMailboxService({
           vm: current,
           action: 'remote',
           signal: entry.controller.signal,
-          payload: { remote: true, native: true, email, profile_id: id },
+          payload: { remote: true, native: true, keep_open: true, email, profile_id: id },
           onStage: (stage) => update(id, { stage }),
           onControl: (send) => {
             entry.send = send

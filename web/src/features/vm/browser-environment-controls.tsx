@@ -32,7 +32,9 @@ export function BrowserEnvironmentControls({
 }) {
   const endpoint = `/api/panel/vms/${encodeURIComponent(vm.id)}/oauth/login/browser-environment`
   const [submitting, setSubmitting] = useState(false)
-  const enabled = ['running', 'ok'].includes(vm.status || '')
+  const enabled =
+    ['running', 'ok', 'paused'].includes(vm.status || '') &&
+    vm.runtime?.stopped !== true
   const query = useQuery({
     queryKey: ['browser-environment', vm.id, endpoint],
     queryFn: () => api<BrowserEnvironment>(endpoint),
@@ -133,7 +135,7 @@ export function BrowserEnvironmentControls({
           <p>浏览器启动检查已通过，未执行账号登录。</p>
         )}
         <p>
-          登录时按需安装，人工授权成功后自动卸载运行环境；凭据和浏览器会话资料保留。全局同时只运行一个浏览器任务。
+          登录时按需安装，授权后保留浏览器和环境。请先手动关闭浏览器，再按需卸载；关闭释放运行资源，卸载保留凭据和会话资料。全局同时只运行一个浏览器任务。
         </p>
       </div>
     </>
