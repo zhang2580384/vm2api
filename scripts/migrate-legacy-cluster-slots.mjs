@@ -5,7 +5,7 @@
  * This never rebuilds a VM: the old container is renamed and retained as a
  * stopped rollback copy, while the replacement reuses its image and settings.
  */
-import { runFleetUpdate } from '../src/lib/vm/fleet-update.mjs'
+import { runFleetUpdateWithDatabase as runFleetUpdate } from '../src/lib/vm/fleet-cli.mjs'
 
 const root = process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/vm2api'
 const concurrency = Number(process.argv[3] || process.env.KIN_FLEET_CONCURRENCY || 4)

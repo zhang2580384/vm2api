@@ -1,4 +1,4 @@
-import { runFleetUpdate } from '../src/lib/vm/fleet-update.mjs'
+import { runFleetUpdateWithDatabase as runFleetUpdate } from '../src/lib/vm/fleet-cli.mjs'
 
 const root = process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/vm2api'
 const concurrency = Number(process.argv[3] || 4)
