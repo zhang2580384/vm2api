@@ -2,7 +2,7 @@
 
 # vm2api
 
-自维护发行版 **v2.4.2**，选择性同步上游 **v1.4.006** 的调度与稳定性修复，Claude 协议保持 **v1.3.226 / 本分支 v2.0.2** 的兼容行为。更新源及镜像使用 `zhang2580384/vm2api`；维护规则和补丁来源见 [维护说明](docs/MAINTENANCE.md)。
+自维护发行版 **v2.4.3**，选择性同步上游 **v1.4.006** 的调度与稳定性修复，Claude 协议保持 **v1.3.226 / 本分支 v2.0.2** 的兼容行为。更新源及镜像使用 `zhang2580384/vm2api`；维护规则和补丁来源见 [维护说明](docs/MAINTENANCE.md)。
 
 **群内基友共同维护 · QQ 群：1126616545**
 
@@ -11,7 +11,9 @@
 <img src="web/public/images/community-qq.png" alt="QQ 交流群 1126616545" width="260" />
 </details>
 
-**v2.4.2：授权完成，运维继续。凭据立即保存，原浏览器继续可用，从登录授权延伸到续费、Session 手动导出与账号管理。**
+**v2.4.3：升级后出口设置不丢失。独立维护沿用已保存的域名转发和 DNS，让槽内浏览器与质量探针继续使用设定出口。**
+
+修复旧版独立服务刷新未初始化数据库，导致“面板设置仍在、实际出口回落默认值”的问题。独立维护会先加载对应项目数据库，数据库异常时停止维护，避免错误配置继续覆盖运行出口。使用自定义 DNS 或域名转发的部署建议升级，详见 [v2.4.3 发行说明](docs/releases/v2.4.3.md)。
 
 登录和远程浏览器在选中槽位内运行，沿用该槽位的代理出口、网络、语言、时区及浏览器会话。首次按需准备 r5 环境并复用校验缓存；授权成功后保留原窗口和远程操控，离开详情页也可返回重连。用户主动关闭后恢复 Docker 原内存和 CPU 限制，再自行选择是否卸载运行环境，凭据和会话资料保留。浏览器打开期间仍占用运行资源及全局浏览器任务锁。原有账号池、注册、剪贴板、静置时手动登录及质量运维继续可用。CF 等第三方验证仍需人工完成，本版不保证验证结果。详见[浏览器环境说明](docs/BROWSER_ENVIRONMENT.md)及 [v2.4.2 发行说明](docs/releases/v2.4.2.md)。
 
@@ -24,7 +26,7 @@
 ### 完全隔离的虚拟机级 AI 订阅转 API 生产网关
 **Next-Generation Fully Isolated VM-Level AI Subscription-to-API Gateway**
 
-[![Release](https://img.shields.io/badge/Release-v2.4.2-blue.svg?style=for-the-badge&logo=github)](https://github.com/zhang2580384/vm2api/releases)
+[![Release](https://img.shields.io/badge/Release-v2.4.3-blue.svg?style=for-the-badge&logo=github)](https://github.com/zhang2580384/vm2api/releases)
 [![License](https://img.shields.io/badge/License-Noncommercial-amber.svg?style=for-the-badge)](LICENSE)
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-Clean%20Verified-00C853?style=for-the-badge&logo=shield)](docs/benchmarks/README.md)
 [![Cluster](https://img.shields.io/badge/Cluster-Multi--VPS%20Ready-7928CA?style=for-the-badge&logo=docker)](docs/DEPLOY.md)
