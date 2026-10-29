@@ -41,6 +41,96 @@ function fakeDocker(onJob) {
   }
 }
 
+test('native callback is delivered once before browser exit and resources remain leased until explicit close', async () => {
+  const controller = new AbortController()
+  let send, ready
+  const callbackReceived = new Promise((resolve) => {
+    ready = resolve
+  })
+  let callbacks = 0,
+    released = false,
+    finished = false
+  const mock = fakeDocker((job, child) => {
+    if (job.action === 'login')
+      queueMicrotask(() => {
+        const event =
+          JSON.stringify({ event: 'callback', callback_url: 'http://localhost:1455/auth/callback?code=fixture' }) + '\n'
+        child.stdout.write(event + event)
+      })
+    if (job.op === 'frame')
+      child.stdout.write(JSON.stringify({ event: 'rpc', id: job.id, ok: true, data: { image: 'fixture' } }) + '\n')
+    if (job.cancel) queueMicrotask(() => child.emit('close', 130))
+  })
+  const events = []
+  const task = runMailboxSlotProcess(
+    {
+      projectRoot: process.cwd(),
+      vm: { id: 'vm-01' },
+      action: 'login',
+      payload: { native: true, keep_open: true },
+      signal: controller.signal,
+      onControl: (value) => {
+        send = value
+      },
+      onCallback: async (value) => {
+        callbacks++
+        assert.equal(value.native, true)
+        assert.match(value.callback, /code=fixture/)
+        ready()
+      },
+      onEvent: (value) => events.push(value),
+      ...mock,
+    },
+    {
+      acquire: async () => async () => {
+        released = true
+      },
+    },
+  )
+  task
+    .finally(() => {
+      finished = true
+    })
+    .catch(() => {})
+  await callbackReceived
+  await new Promise(setImmediate)
+  assert.equal(callbacks, 1)
+  assert.equal(finished, false)
+  assert.equal(released, false)
+  send({ op: 'frame', id: '00000000-0000-0000-0000-000000000000' })
+  assert.equal(events[0].data.image, 'fixture')
+  controller.abort()
+  await assert.rejects(task, /login_cancelled/)
+  assert.equal(released, true)
+})
+
+test('failed live authorization aborts the retained child and returns a safe error', async () => {
+  const mock = fakeDocker((job, child) => {
+    if (job.action === 'login')
+      queueMicrotask(() =>
+        child.stdout.write(
+          JSON.stringify({ event: 'callback', callback_url: 'http://localhost:1455/auth/callback?code=fixture' }) +
+            '\n',
+        ),
+      )
+    if (job.cancel) queueMicrotask(() => child.emit('close', 130))
+  })
+  await assert.rejects(
+    runMailboxSlotProcess({
+      projectRoot: process.cwd(),
+      vm: { id: 'vm-01' },
+      action: 'login',
+      payload: { native: true, keep_open: true },
+      onCallback: async () => {
+        throw Object.assign(new Error('private diagnostic'), { code: 'oauth_state_mismatch' })
+      },
+      ...mock,
+    }),
+    (error) => error.code === 'oauth_state_mismatch' && !error.message.includes('private'),
+  )
+  assert.equal(mock.calls.at(-1).job.cancel, true)
+})
+
 test('authorization survives resource cleanup failure; browser errors keep their original code', async () => {
   for (const browserFails of [false, true]) {
     let released = false

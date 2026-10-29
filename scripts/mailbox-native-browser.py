@@ -314,7 +314,7 @@ def callback_listener(state, output):
             else:
                 self.send_error(400)
                 return
-            body = b'Authorization received. You may close this window.'
+            body = b'Authorization received. You can continue using this browser, or close it from the panel.'
             self.send_response(200)
             self.send_header('Content-Type', 'text/plain; charset=utf-8')
             self.send_header('Content-Length', str(len(body)))
@@ -351,6 +351,7 @@ def run(payload, controls):
     spec.loader.exec_module(display_module)
     callbacks = queue.Queue()
     remote = payload.get('remote') is True
+    keep_open = payload.get('keep_open') is True
     url = 'https://chatgpt.com/' if remote else payload.get('auth_url', '')
     listener = contextlib.nullcontext(None) if remote else callback_listener(payload.get('state', ''), callbacks)
     with display_module.slot_browser_display(runtime) as env, listener as server:
@@ -373,8 +374,9 @@ def run(payload, controls):
                         browser.wait()
             stack.callback(close_browser)
             emit('stage', stage='native_manual_login')
+            retained = remote and keep_open
             idle, deadline = time.monotonic(), time.monotonic() + (1800 if remote else 500)
-            while time.monotonic() < deadline:
+            while retained or time.monotonic() < deadline:
                 desktop.pump()
                 if server:
                     server.handle_request()
@@ -383,10 +385,19 @@ def run(payload, controls):
                     if isinstance(value, Exception):
                         raise value
                     emit('callback', callback_url=value)
-                    return
+                    if not keep_open:
+                        return
+                    # The panel exchanges and saves credentials while this same
+                    # native window remains available. Release the one-shot
+                    # callback port, but keep the profile, display and controls.
+                    retained = True
+                    server.server_close()
+                    server = None
                 if browser.poll() is not None:
+                    if retained:
+                        return
                     raise NativeError('browser_closed')
-                if time.monotonic() - idle > 300:
+                if not retained and time.monotonic() - idle > 300:
                     raise NativeError('remote_idle_timeout')
                 try:
                     message = controls.get(timeout=.03)

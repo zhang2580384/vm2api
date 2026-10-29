@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
 import { toast } from 'sonner'
-import { api, panelFetch } from '@/lib/api'
+import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -27,7 +27,6 @@ export function CodexBrowserPanel({ vm }: { vm: Vm }) {
   const clipboardField = useRef<HTMLTextAreaElement>(null)
   const clipboardGeneration = useRef(0)
   const [url, setUrl] = useState('https://chatgpt.com/')
-  const owned = useRef(false)
   const status = useQuery({
     queryKey: ['codex-login', vm.id],
     queryFn: () => api<LoginStatus>(endpoint),
@@ -45,7 +44,6 @@ export function CodexBrowserPanel({ vm }: { vm: Vm }) {
   useEffect(() => {
     const connect = (event: Event) => {
       if ((event as CustomEvent<string>).detail !== vm.id) return
-      owned.current = false
       setOpen(true)
     }
     window.addEventListener('codex-open-browser', connect)
@@ -64,16 +62,6 @@ export function CodexBrowserPanel({ vm }: { vm: Vm }) {
     retry: false,
     gcTime: 0,
   })
-  useEffect(
-    () => () => {
-      if (owned.current)
-        void panelFetch(`${endpoint}/cancel`, {
-          method: 'POST',
-          body: '{}',
-        }).catch(() => {})
-    },
-    [endpoint]
-  )
   async function control(op: string, data: Record<string, unknown> = {}) {
     try {
       await api(`${endpoint}/control`, {
@@ -90,11 +78,10 @@ export function CodexBrowserPanel({ vm }: { vm: Vm }) {
     setBusy(true)
     setOpen(true)
     try {
-      const result = await api<LoginStatus>(`${endpoint}/remote`, {
+      await api<LoginStatus>(`${endpoint}/remote`, {
         method: 'POST',
         body: '{}',
       })
-      owned.current = result.browser.remote
       await status.refetch()
     } catch (error) {
       toast.error(loginLabel((error as Error).message))
@@ -144,7 +131,6 @@ export function CodexBrowserPanel({ vm }: { vm: Vm }) {
     setBusy(true)
     try {
       await api(`${endpoint}/cancel`, { method: 'POST', body: '{}' })
-      owned.current = false
       setOpen(false)
       await status.refetch()
     } catch (error) {
@@ -176,17 +162,19 @@ export function CodexBrowserPanel({ vm }: { vm: Vm }) {
             disabled={busy}
             onClick={() => void stop()}
           >
-            停止浏览器任务
+            关闭浏览器
           </Button>
         )}
       </div>
       <p className='text-xs text-muted-foreground'>
-        手动登录使用槽内原生浏览器，鼠标键盘通过独立远程桌面传递。授权成功后自动卸载运行环境，保留凭据和会话资料。
+        授权成功后保留当前浏览器，可继续续费和管理账号。操作完成后请手动关闭；关闭后可按需卸载环境，凭据和会话资料保留。
       </p>
       {open && (
         <>
           <p aria-live='polite' className='text-xs'>
-            {loginLabel(status.data?.state.stage || 'preparing_browser')}
+            {status.data?.browser.retained
+              ? '授权已保存，浏览器保持打开，可继续操作'
+              : loginLabel(status.data?.state.stage || 'preparing_browser')}
             {status.data?.state.error_code &&
               ` · ${loginLabel(status.data.state.error_code)}`}
           </p>
@@ -227,6 +215,18 @@ export function CodexBrowserPanel({ vm }: { vm: Vm }) {
               }}
             >
               ChatGPT
+            </Button>
+            <Button
+              size='sm'
+              variant='outline'
+              disabled={!usable}
+              onClick={() => {
+                const sessionUrl = 'https://chatgpt.com/api/auth/session'
+                setUrl(sessionUrl)
+                void control('navigate', { url: sessionUrl })
+              }}
+            >
+              Session 页面
             </Button>
           </div>
           {enabled && !manual && (
@@ -382,6 +382,11 @@ export function CodexBrowserPanel({ vm }: { vm: Vm }) {
             </div>
             <p className='text-xs text-muted-foreground'>
               先在远程网页点击复制，再读取到这里。内容仅临时显示，关闭屏幕后清除。
+            </p>
+            <p className='text-xs text-muted-foreground'>
+              导出 Session：先确认 ChatGPT 网页已登录，再打开“Session
+              页面”，在远程画面按
+              Ctrl+A、Ctrl+C，最后读取远程剪贴板并复制到本机。
             </p>
             {clipboard && (
               <Textarea
