@@ -2,7 +2,7 @@
 
 本仓库为 `zhang2580384/vm2api`，首个独立发行版为 **v2.0.0**，上游基线为 `dofastted/vm2api` 的 **v1.3.226**（`7cd52501c03c03e36493c38e39edc349de7d0c99`）。保留上游版权及 LICENSE。
 
-当前发行版 **v2.4.1** 选择性同步上游 **v1.4.006**（`07edb2cdc0576da1ea9a64bc2d27c00fb4c15aff`），通过 merge 保留双方提交历史。Claude 协议及匹配 payload 保留 v2.0.2 / v1.3.226 兼容实现，不表示与上游完整等价；暂缓项目及验收条件见 [同步记录](UPSTREAM_SYNC_1.4.006.md)。首次独立版本的来源记录保持不变。
+当前发行版 **v2.4.2** 选择性同步上游 **v1.4.006**（`07edb2cdc0576da1ea9a64bc2d27c00fb4c15aff`），通过 merge 保留双方提交历史。Claude 协议及匹配 payload 保留 v2.0.2 / v1.3.226 兼容实现，不表示与上游完整等价；暂缓项目及验收条件见 [同步记录](UPSTREAM_SYNC_1.4.006.md)。首次独立版本的来源记录保持不变。
 
 ## 维护和发布规则
 
@@ -25,7 +25,7 @@
 | 账号密码导入和槽位登录 | 从 [ohno1007 的提交](https://github.com/ohno1007/vm2api/commit/f6512155fe3d6230c4178c4f262408b44f211f06) 提取账号池、加密存储、绑定、密码/TOTP/微软邮箱登录及人工验证码接管；保留来源和作者署名 |
 | IPv6 地理位置 | 原自有补丁 `d54e2c2` 的生产代码及测试已经包含在 v1.3.226 基线中，无须重复应用；保留 `KIN_PROXY_GEO_V6_LOOKUP_MODE=control-plane` 配置兼容性 |
 
-ohno1007 的原提交还包含协议、计费、模型指纹、订阅管理等改动；本版不引入这些无关功能。登录辅助模块保留原有内部支持代码，但不开放订阅付费管理或 Session 导出接口。
+ohno1007 的原提交还包含协议、计费、模型指纹、订阅管理等改动；本版不引入这些无关功能。登录辅助模块保留原有内部支持代码，但不开放订阅付费管理或自动 Session 导出接口。v2.4.2 提供官网 Session 页面快捷入口，由操作者在当前槽位网页会话中手动复制。
 
 ## 账号密码导入
 
@@ -61,6 +61,8 @@ fixture@example.com----gpt-fixture-password----JBSWY3DPEHPK3PXP
 ## v2.0.2 新增能力
 
 槽位注册与恢复见 [CODEX_REGISTRATION.md](CODEX_REGISTRATION.md)，运行包管理见 [BROWSER_ENVIRONMENT.md](BROWSER_ENVIRONMENT.md)，质量运维配置预览和执行边界见 [OPERATIONS_PREVIEW.md](OPERATIONS_PREVIEW.md)。糖果题原文及判定参考 [ranxi2001/sub2api v2.17.3](https://github.com/ranxi2001/sub2api/tree/v2.17.3)，保留来源说明；门票探针尚未移植。
+
+后续版本已接通真实质量检测、定时任务及独立调度恢复开关，当前行为以 [质量运维说明](OPERATIONS_PREVIEW.md)为准。v2.4.2 的授权后保留窗口、手动关闭与卸载边界见 [发行说明](releases/v2.4.2.md)。
 
 出口网络从显式地址池分配 /24，并避开已有 Docker 网络及宿主路由。站点自有保留范围通过 `KIN_EGRESS_RESERVED_CIDRS` 配置，逗号分隔 IPv4 CIDR；公开版本不内置某一部署的内网拓扑。已有冲突网络会拒绝使用，不自动迁移。内网部署升级前应在私有环境文件设置保留范围。
 
