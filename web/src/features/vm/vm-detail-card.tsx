@@ -48,6 +48,7 @@ import { ActiveVmBadge } from '@/features/vm/active-vm-badge'
 import { restrictionTitle } from '@/features/vm/clear-restriction'
 import { Field } from '@/features/vm/detail-section-primitives'
 import { NodeChip } from '@/features/vm/node-chip'
+import { OpenaiAccountStatus } from '@/features/vm/openai-account-status'
 import { OpenaiPlanBadge } from '@/features/vm/openai-plan-badge'
 import { RuntimeChip } from '@/features/vm/runtime-chip'
 import {
@@ -200,7 +201,12 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
                 {vm.email ? compactEmail(String(vm.email), 30) : '-'}
               </span>
             </Field>
-            <Field label='过期' compact>
+            {codex ? (
+              <Field label='账号状况' compact>
+                <OpenaiAccountStatus vm={vm} allowQuery={false} showExpiry />
+              </Field>
+            ) : null}
+            <Field label={codex ? '凭证到期' : '过期'} compact>
               <StatusMark tone={credExpiry(vm)} variant='pill' />{' '}
               <span className='text-xs text-muted-foreground'>
                 {fmtExpiresAt(vm.expires_at)}

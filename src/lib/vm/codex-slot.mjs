@@ -12,6 +12,11 @@ import {
   hasSpendableCodexCredits,
 } from '../protocol/codex-usage.mjs'
 import { decodeJwtPayload, openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
+import {
+  codexAccountStamp,
+  openaiAccountObservation,
+  summarizeOpenaiAccountStatus,
+} from '../oauth/openai-account-status.mjs'
 
 export { isCodexVm }
 
@@ -307,6 +312,7 @@ export function upsertCodexAccount(projectRoot, vmId, patch = {}, { replaceCrede
       'id_token',
       'expires_at',
       'refreshed_at',
+      'account_status',
     ]) {
       delete previous[key]
     }
@@ -317,6 +323,14 @@ export function upsertCodexAccount(projectRoot, vmId, patch = {}, { replaceCrede
   else accounts[0] = cur
   writeCodexAccounts(projectRoot, vmId, accounts)
   return cur
+}
+
+/** Discard results if an import/refresh changed the credential while the query was in flight. */
+export function recordCodexAccountObservation(projectRoot, vmId, account, result) {
+  const current = readCodexAccounts(projectRoot, vmId)[0]
+  if (!current || codexAccountStamp(current) !== codexAccountStamp(account)) return false
+  upsertCodexAccount(projectRoot, vmId, { account_status: openaiAccountObservation(current, result) })
+  return true
 }
 
 /** Drop stale manual parks when window caps no longer apply; same contract as persistCodexUsage. */
@@ -395,5 +409,6 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
     reset_credits: vm.codex?.reset_credits || null,
     credits: vm.codex?.credits || null,
     plan_type: vm.codex?.plan_type || null,
+    account_status: summarizeOpenaiAccountStatus(first, vm.codex),
   }
 }

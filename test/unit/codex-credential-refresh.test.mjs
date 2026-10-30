@@ -82,6 +82,24 @@ test('concurrent manual and scheduled refresh rotate the grant once', async (t) 
   assert.equal(results.filter((r) => r.refreshed).length, 1)
 })
 
+test('explicit refresh can run while resting without enabling scheduling; background refresh still skips', async (t) => {
+  const s = slot(t)
+  const file = path.join(s.root, 'vms', `${s.id}.json`)
+  const vm = JSON.parse(fs.readFileSync(file))
+  fs.writeFileSync(file, JSON.stringify({ ...vm, schedulable: false }))
+  const skipped = await ensureCodexCredential(s.root, s.id, {
+    refresh: () => assert.fail('background refresh must skip'),
+  })
+  assert.equal(skipped.refresh_class, 'skipped')
+  const explicit = await ensureCodexCredential(s.root, s.id, {
+    force: true,
+    allowResting: true,
+    refresh: async () => rotated,
+  })
+  assert.equal(explicit.refreshed, true)
+  assert.equal(JSON.parse(fs.readFileSync(file)).schedulable, false)
+})
+
 test('an account imported during refresh is never overwritten', async (t) => {
   const s = slot(t)
   const result = await ensureCodexCredential(s.root, s.id, {

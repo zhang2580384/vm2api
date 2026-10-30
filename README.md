@@ -2,7 +2,7 @@
 
 # vm2api
 
-自维护发行版 **v2.4.3**，选择性同步上游 **v1.4.006** 的调度与稳定性修复，Claude 协议保持 **v1.3.226 / 本分支 v2.0.2** 的兼容行为。更新源及镜像使用 `zhang2580384/vm2api`；维护规则和补丁来源见 [维护说明](docs/MAINTENANCE.md)。
+自维护发行版 **v2.4.4**，选择性同步上游 **v1.4.006** 的调度与稳定性修复，Claude 协议保持 **v1.3.226 / 本分支 v2.0.2** 的兼容行为。更新源及镜像使用 `zhang2580384/vm2api`；维护规则和补丁来源见 [维护说明](docs/MAINTENANCE.md)。
 
 **群内基友共同维护 · QQ 群：1126616545**
 
@@ -11,7 +11,9 @@
 <img src="web/public/images/community-qq.png" alt="QQ 交流群 1126616545" width="260" />
 </details>
 
-**v2.4.3：升级后出口设置不丢失。独立维护沿用已保存的域名转发和 DNS，让槽内浏览器与质量探针继续使用设定出口。**
+**v2.4.4：无需打开浏览器，查询 GPT 当前套餐与账号状况。套餐、凭证有效期和使用限制分别呈现，刷新凭证也有明确的等待上限。**
+
+使用现有凭证，经所选槽位出口查询当前套餐；概览、账号详情和槽位列表显示状态及最近确认时间。网络故障与凭证过期不会直接判为订阅到期，历史结果失效后明确提示待确认；手动与后台刷新共用旋转锁，避免并发换票覆盖新凭证。详见 [v2.4.4 发行说明](docs/releases/v2.4.4.md)。
 
 修复旧版独立服务刷新未初始化数据库，导致“面板设置仍在、实际出口回落默认值”的问题。独立维护会先加载对应项目数据库，数据库异常时停止维护，避免错误配置继续覆盖运行出口。使用自定义 DNS 或域名转发的部署建议升级，详见 [v2.4.3 发行说明](docs/releases/v2.4.3.md)。
 
@@ -26,7 +28,7 @@
 ### 完全隔离的虚拟机级 AI 订阅转 API 生产网关
 **Next-Generation Fully Isolated VM-Level AI Subscription-to-API Gateway**
 
-[![Release](https://img.shields.io/badge/Release-v2.4.3-blue.svg?style=for-the-badge&logo=github)](https://github.com/zhang2580384/vm2api/releases)
+[![Release](https://img.shields.io/badge/Release-v2.4.4-blue.svg?style=for-the-badge&logo=github)](https://github.com/zhang2580384/vm2api/releases)
 [![License](https://img.shields.io/badge/License-Noncommercial-amber.svg?style=for-the-badge)](LICENSE)
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-Clean%20Verified-00C853?style=for-the-badge&logo=shield)](docs/benchmarks/README.md)
 [![Cluster](https://img.shields.io/badge/Cluster-Multi--VPS%20Ready-7928CA?style=for-the-badge&logo=docker)](docs/DEPLOY.md)

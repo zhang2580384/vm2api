@@ -21,13 +21,13 @@ function summary(account) {
 export async function ensureCodexCredential(
   projectRoot,
   vmId,
-  { force = false, timeoutMs = 60_000, refresh = refreshCodexAccessToken } = {},
+  { force = false, allowResting = false, timeoutMs = 20_000, refresh = refreshCodexAccessToken } = {},
 ) {
   const snapshot = readCodexAccounts(projectRoot, vmId)[0] || {}
   return withVmLock(codexCredentialPath(projectRoot, vmId), async () => {
     const vm = getVm(projectRoot, vmId)
     if (!vm) return { ok: false, refresh_class: 'fatal', error: { code: 'vm_not_found' } }
-    if (vm.schedulable === false)
+    if (vm.schedulable === false && !allowResting)
       return {
         ok: false,
         refresh_class: 'skipped',
@@ -83,7 +83,11 @@ export async function ensureCodexCredential(
         refresh_class: fatal ? 'fatal' : 'retryable',
         error: {
           code: tok.error || 'refresh_failed',
-          message: fatal ? 'GPT 授权已失效，请重新授权。' : 'GPT 令牌刷新暂时失败，将自动重试。',
+          message: fatal
+            ? 'GPT 授权已失效，请重新授权；这不代表订阅已到期。'
+            : tok.error === 'timeout'
+              ? 'GPT 凭证刷新超时，请检查该槽代理后重试。'
+              : 'GPT 令牌刷新暂时失败，请稍后重试。',
         },
       }
     }

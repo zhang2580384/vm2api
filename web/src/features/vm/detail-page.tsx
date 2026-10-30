@@ -100,6 +100,9 @@ function postVm<T = unknown>(id: string, path: string, body?: unknown) {
   return api<T>(`/api/panel/vms/${encodeURIComponent(id)}${path}`, {
     method: 'POST',
     body: body === undefined ? undefined : JSON.stringify(body),
+    ...(path === '/oauth/refresh'
+      ? { signal: AbortSignal.timeout(30_000) }
+      : {}),
   })
 }
 
@@ -203,9 +206,15 @@ function VmDetailBody({
     mutationFn: (j: VmJob) => j.run(),
     onSuccess: async (data, j) => {
       j.done?.(data)
-      await refreshAll()
+      if (j.key === '/oauth/refresh') void refreshAll()
+      else await refreshAll()
     },
-    onError: (error: Error) => toast.error(error.message),
+    onError: (error: Error) =>
+      toast.error(
+        error.name === 'TimeoutError'
+          ? '操作超时，请检查该槽代理后重试'
+          : error.message
+      ),
   })
   const pendingKeys = useMutationState({
     filters: { mutationKey: jobKey, status: 'pending' },
@@ -232,6 +241,8 @@ function VmDetailBody({
           toast.success('已关机，调度已关闭')
         } else if (path === '/activate') {
           toast.success('已设为活跃槽')
+        } else if (path === '/oauth/refresh') {
+          toast.success('凭证已刷新，可点击“查询账号状态”核对当前套餐')
         } else {
           toast.success('已执行 ' + path)
         }
