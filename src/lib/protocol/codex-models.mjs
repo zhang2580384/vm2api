@@ -244,9 +244,35 @@ export function makeProxyFetch(proxyUrl, timeoutMs = 15000, { maxMs = 30000 } = 
     const agent = px ? createProxyAgent(px) : undefined
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(), ms)
-    const opts = { ...init, signal: ac.signal }
+    const opts = { ...init, signal: init.signal ? AbortSignal.any([ac.signal, init.signal]) : ac.signal }
     if (agent) opts.agent = agent
     return fetch(url, opts).finally(() => clearTimeout(timer))
+  }
+}
+
+/** Deadline covers connecting AND reading the JSON body, even if an upstream never finishes it. */
+export async function fetchCodexJson(url, init = {}, { proxyUrl, fetchImpl, timeoutMs = 15_000 } = {}) {
+  const ms = Math.min(30_000, Math.max(1, Number(timeoutMs) || 15_000))
+  const controller = new AbortController()
+  let timer
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(Object.assign(new Error('Upstream request timed out'), { name: 'AbortError' }))
+    }, ms)
+  })
+  try {
+    return await Promise.race([
+      (async () => {
+        const fetchFn = fetchImpl || makeProxyFetch(proxyUrl, ms)
+        const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
+        const res = await fetchFn(url, { ...init, signal })
+        return { status: Number(res?.status) || 0, payload: await readFetchBody(res) }
+      })(),
+      expired,
+    ])
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -257,7 +283,6 @@ export function makeProxyFetch(proxyUrl, timeoutMs = 15000, { maxMs = 30000 } = 
 export async function refreshCodexAccessToken(opts = {}) {
   const refreshToken = String(opts.refreshToken || '').trim()
   if (!refreshToken) return { ok: false, error: 'missing_refresh_token' }
-  const fetchFn = opts.fetchImpl || makeProxyFetch(opts.proxyUrl, opts.timeoutMs)
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
@@ -265,20 +290,27 @@ export async function refreshCodexAccessToken(opts = {}) {
     scope: CODEX_OAUTH_SCOPE,
   })
   try {
-    const res = await fetchFn(CODEX_OAUTH_TOKEN_URL, {
-      method: 'POST',
-      headers: {
-        accept: 'application/json',
-        'content-type': 'application/x-www-form-urlencoded',
-        'user-agent': CODEX_USER_AGENT,
+    const { status, payload } = await fetchCodexJson(
+      CODEX_OAUTH_TOKEN_URL,
+      {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/x-www-form-urlencoded',
+          'user-agent': CODEX_USER_AGENT,
+        },
+        body: String(body),
       },
-      body: String(body),
-    })
-    const status = Number(res?.status) || 0
-    const payload = await readFetchBody(res)
-    if (status === 401 || status === 403) {
+      opts,
+    )
+    const grantError = String(typeof payload?.error === 'string' ? payload.error : payload?.error?.code || '')
+    if (status >= 400 && /^(invalid_grant|refresh_token_reused)$/.test(grantError)) {
+      return { ok: false, error: grantError, status }
+    }
+    if (status === 401) {
       return { ok: false, error: 'refresh_rejected', status }
     }
+    if (status === 403) return { ok: false, error: 'refresh_forbidden', status }
     if (status >= 400) return { ok: false, error: 'refresh_failed', status }
     const access = String(payload?.access_token || '').trim()
     if (!access) return { ok: false, error: 'refresh_empty', status }

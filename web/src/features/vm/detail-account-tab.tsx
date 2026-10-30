@@ -30,6 +30,7 @@ import { CredentialPanel } from '@/features/vm/credential-panel'
 import { Field, Meter } from '@/features/vm/detail-section-primitives'
 import type { VmTodayCounts } from '@/features/vm/detail-today'
 import { OfficialCcCard } from '@/features/vm/official-cc-card'
+import { OpenaiAccountStatus } from '@/features/vm/openai-account-status'
 import { OpenaiPlanBadge } from '@/features/vm/openai-plan-badge'
 import { isRemoteVm, REMOTE_UNSUPPORTED_TEXT } from '@/features/vm/placement'
 import {
@@ -145,7 +146,7 @@ export function VmAccountTab(props: VmAccountTabProps) {
               <Field label='类型' compact>
                 {credType === 'none' ? '—' : credTypeLabel(credType)}
               </Field>
-              <Field label='状态' compact>
+              <Field label={gpt ? '凭证状态' : '状态'} compact>
                 <StatusMark tone={credExpiry(vm)} variant='pill' />
               </Field>
               {claudeTier(vm).key !== 'none' ? (
@@ -158,7 +159,12 @@ export function VmAccountTab(props: VmAccountTabProps) {
                 </Field>
               ) : null}
               {gpt ? (
-                <Field label='订阅到期（以凭证为准）' compact>
+                <Field label='账号状况' compact>
+                  <OpenaiAccountStatus vm={vm} />
+                </Field>
+              ) : null}
+              {gpt ? (
+                <Field label='订阅到期（凭证记录）' compact>
                   {fmtExpiresAt(vm.chatgpt_subscription_active_until)}
                 </Field>
               ) : null}
@@ -174,7 +180,7 @@ export function VmAccountTab(props: VmAccountTabProps) {
                   <Field label='Refresh' compact>
                     {vm.has_refresh ? '已绑定' : '—'}
                   </Field>
-                  <Field label='过期' compact>
+                  <Field label={gpt ? '访问凭证到期' : '过期'} compact>
                     {fmtExpiresAt(vm.expires_at)}
                   </Field>
                 </>

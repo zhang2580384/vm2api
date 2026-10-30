@@ -8,7 +8,12 @@ import { getVm, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { isLocalEgressProxy } from '../vm/egress.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
-import { readCodexAccounts, upsertCodexAccount, persistCodexQuotaSnapshot } from '../vm/codex-slot.mjs'
+import {
+  readCodexAccounts,
+  upsertCodexAccount,
+  persistCodexQuotaSnapshot,
+  recordCodexAccountObservation,
+} from '../vm/codex-slot.mjs'
 import {
   buildCodexUsageView,
   extraToCodexSnapshot,
@@ -382,6 +387,15 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   )
   const persistable = resetCredits.available_count <= 0 || resetCredits.credits.length > 0 ? resetCredits : null
   const credits = normalizeCodexCredits(pack.usage.payload?.credits)
+  recordCodexAccountObservation(
+    projectRoot,
+    vmId,
+    { ...current.first, access_token: current.access },
+    {
+      payload: pack.usage.payload,
+      status: pack.usage.status,
+    },
+  )
   persistCodexQuotaSnapshot(projectRoot, vmId, {
     extra,
     credits,

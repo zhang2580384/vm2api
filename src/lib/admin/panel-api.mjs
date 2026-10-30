@@ -1945,6 +1945,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     refresh_error: v.refresh_error || null,
     chatgpt_subscription_active_until: isCodex ? v.chatgpt_subscription_active_until || null : null,
     chatgpt_plan_type: isCodex ? v.chatgpt_plan_type || null : null,
+    openai_account_status: isCodex ? v.openai_account_status || null : null,
     has_session_key: !!v.has_session_key,
     proxy: merged.proxy,
     proxy_id: merged.proxy?.id || v.proxy_id || v.proxy?.id || null,

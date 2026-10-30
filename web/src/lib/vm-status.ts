@@ -717,7 +717,11 @@ export function claudeTier(vm: Vm | undefined): StatusTone {
   if (isCodexVm(vm)) {
     if (!vm?.has_token)
       return { key: 'none', label: '—', cls: 'none', text: '—' }
-    const plan = openaiPlanLabel(vm?.plan_type || vm?.chatgpt_plan_type)
+    const plan = openaiPlanLabel(
+      vm?.openai_account_status?.plan_type ||
+        vm?.plan_type ||
+        vm?.chatgpt_plan_type
+    )
     return { key: 'codex', label: plan, cls: 'codex', text: plan }
   }
   if (!vm?.has_token) return { key: 'none', label: '—', cls: 'none', text: '—' }

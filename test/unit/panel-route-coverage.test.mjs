@@ -67,6 +67,7 @@ const PANEL_ROUTE_SAMPLES = [
   ['POST', '/api/panel/vms/vm-01/oauth/exchange-code'],
   ['POST', '/api/panel/vms/vm-01/oauth/to-setup-token'],
   ['POST', '/api/panel/vms/vm-01/oauth/refresh'],
+  ['POST', '/api/panel/vms/vm-01/oauth/account-status'],
   ['GET', '/api/panel/vms/vm-01/oauth/credential'],
   ['PUT', '/api/panel/vms/vm-01/oauth/credential'],
   ['POST', '/api/panel/vms/vm-01/start'],

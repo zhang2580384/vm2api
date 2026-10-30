@@ -47,6 +47,7 @@ import {
 } from '@/features/vm/detail-section-primitives'
 import type { VmTodayCounts } from '@/features/vm/detail-today'
 import { KernelFeatTags } from '@/features/vm/kernel-feat-tags'
+import { OpenaiAccountStatus } from '@/features/vm/openai-account-status'
 import { OpenaiPlanBadge } from '@/features/vm/openai-plan-badge'
 import { OpenaiQuotaPanel } from '@/features/vm/openai-quota-panel'
 import { proxyHealthOf } from '@/features/vm/proxy-health'
@@ -268,6 +269,11 @@ export function VmStatusBoard(props: Props) {
                 compact
               />
             </Field>
+            {isCodexVm(vm) ? (
+              <Field label='账号状况' compact>
+                <OpenaiAccountStatus vm={vm} showExpiry />
+              </Field>
+            ) : null}
             {isCodexVm(vm) ? (
               <Field label='平台' compact>
                 OpenAI / Codex

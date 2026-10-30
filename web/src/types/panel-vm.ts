@@ -294,6 +294,23 @@ export type Vm = {
   chatgpt_subscription_active_until?: string | null
   /** Plan label fallback from OAuth `id_token` when `plan_type` from usage is absent. */
   chatgpt_plan_type?: string | null
+  openai_account_status?: {
+    plan_type: string | null
+    subscription_status:
+      'paid' | 'free' | 'claim_active' | 'claim_elapsed' | 'unknown'
+    credential_status:
+      'valid' | 'expired' | 'rejected' | 'missing' | 'unverified'
+    source: 'usage' | 'credential' | 'none'
+    checked_at: string | null
+    last_success_at: string | null
+    subscription_active_until: string | null
+    credential_expires_at: string | null
+    usage_allowed: boolean | null
+    limit_reached: boolean | null
+    stale: boolean
+    error: string | null
+    http_status: number | null
+  } | null
   reset_credits?: {
     available_count?: number
     credits?: Array<{ expires_at?: string }>

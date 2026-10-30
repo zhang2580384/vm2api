@@ -103,6 +103,8 @@ import {
 import { publicEndpointView, fetchUpstreamModels, API_ENDPOINT_PRESETS } from './api-endpoints.mjs'
 import { runAnthropicConsole, resolveConsoleProxyUrl, savedEndpointKey } from './anthropic-console.mjs'
 import { publicUserView } from './panel-users.mjs'
+import { queryCodexAccountStatus } from '../oauth/codex-account-status.mjs'
+import { ensureCodexCredential } from '../oauth/codex-credential-refresh.mjs'
 import { authorizePanelRoute, mePayload, panelIdentity } from './panel-acl.mjs'
 import {
   denyIfUserCannotDeleteVm,
@@ -4974,6 +4976,21 @@ export function createPanelHandler(ctx) {
         )
       }
 
+      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/oauth\/account-status$/.test(p)) {
+        const id = p.split('/')[4]
+        const result = await queryCodexAccountStatus({
+          projectRoot: cfg.paths.project,
+          vmId: id,
+          fetchImpl: ctx.fetchImpl,
+        })
+        if (!result.ok)
+          return json(res, result.status || 502, {
+            ok: false,
+            error: result.error,
+            data: { account_status: result.account_status || null },
+          })
+        return json(res, 200, panel.ok({ account_status: result.account_status }))
+      }
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/oauth\/refresh$/.test(p)) {
         const id = p.split('/')[4]
         const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
@@ -4982,31 +4999,18 @@ export function createPanelHandler(ctx) {
         }
         const vm = getVm(cfg.paths.project, id)
         if (isCodexVm(vm)) {
-          const first = readCodexAccounts(cfg.paths.project, id)[0] || {}
-          const refreshToken = String(first.refresh_token || '').trim()
-          if (!refreshToken) {
-            return json(res, 400, {
-              ok: false,
-              error: { code: 'credential_mode_unsupported', message: 'GPT 槽没有 refresh_token，请重新导入 OAuth' },
-            })
-          }
-          const tok = await refreshCodexAccessToken({
-            refreshToken,
-            proxyUrl: hostProxyUrlForVm(vm),
-          })
-          if (!tok.ok) {
-            return json(res, 502, {
-              ok: false,
-              error: { code: tok.error || 'refresh_failed', message: 'GPT OAuth 刷新失败，请重新导入' },
-            })
-          }
-          upsertCodexAccount(cfg.paths.project, id, {
-            access_token: tok.access_token,
-            refresh_token: tok.refresh_token,
-            id_token: tok.id_token || first.id_token,
-            expires_at: tok.expires_at || first.expires_at,
-          })
-          return json(res, 200, panel.ok({ ok: true, refreshed: true, platform: 'openai' }))
+          const result = await ensureCodexCredential(cfg.paths.project, id, { force: true, allowResting: true })
+          if (!result.ok)
+            return json(
+              res,
+              result.refresh_class === 'unsupported' ? 400 : result.error?.code === 'timeout' ? 504 : 502,
+              {
+                ok: false,
+                error: result.error,
+                data: result,
+              },
+            )
+          return json(res, 200, panel.ok(result))
         }
         if (isApiKeyMode(vm?.claude?.mode)) {
           return json(res, 400, {

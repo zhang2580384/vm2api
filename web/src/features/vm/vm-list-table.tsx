@@ -5,6 +5,7 @@ import type { StatusTone } from '@/types/status'
 import { GripVertical, RotateCcw } from 'lucide-react'
 import { expiresAtToMs, fmtResetClock } from '@/lib/fable-status'
 import { fmtNum } from '@/lib/format'
+import { openaiAccountTone } from '@/lib/openai-account-status'
 import { tierVisual } from '@/lib/tier-visual'
 import { cn } from '@/lib/utils'
 import { isCodexVm, slotNameLabel } from '@/lib/vm-kind'
@@ -369,6 +370,14 @@ function SlotCell({ vm }: { vm: Vm }) {
         vm={vm}
         className='truncate text-[10.5px] text-muted-foreground'
       />
+      {isCodexVm(vm) ? (
+        <p
+          className='truncate text-[10.5px] text-muted-foreground'
+          title={openaiAccountTone(vm).text}
+        >
+          {openaiAccountTone(vm).text}
+        </p>
+      ) : null}
     </div>
   )
 }
