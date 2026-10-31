@@ -105,6 +105,10 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: worker/go.sum
       - run: npm ci
       - name: fetch and verify both exact payload baselines
         run: |
@@ -119,6 +123,17 @@ jobs:
           mkdir -p "$RUNNER_TEMP/previous-vm2api/node_modules"
           mkdir "$RUNNER_TEMP/protocol-evidence"
           chmod 0777 "$RUNNER_TEMP/protocol-evidence"
+      - name: build worker source without replacing the pinned artifact
+        working-directory: worker
+        run: CGO_ENABLED=0 go build -buildvcs=false -trimpath -o "$RUNNER_TEMP/worker-from-source" ./cmd/kin-worker
+      - name: offline pinned and rebuilt AMD64 worker OAuth contracts
+        run: |
+          docker run --rm --network none --read-only --user 1000:1000 --cpus 2 --memory 512m \
+            --tmpfs /tmp:rw,exec,size=128m,uid=1000,gid=1000 \
+            -v "$PWD:/candidate:ro" -v "$RUNNER_TEMP/worker-from-source:/worker-from-source:ro" \
+            --entrypoint python3 python:3.12-slim \
+            /candidate/test/deploy/smoke_worker_oauth.py /candidate/bin/kin-worker /worker-from-source \
+            | tee "$RUNNER_TEMP/protocol-evidence/worker-amd64.log"
       - name: offline native HTTP and complete state rollback
         run: |
           docker run --rm --network none --read-only --user 1000:1000 --cpus 2 --memory 3g --pids-limit 512 \
@@ -153,3 +168,9 @@ jobs:
           docker run --network none --cpus 2 --memory 3g --pids-limit 256 \
             --entrypoint python3 -v "$PWD/test/deploy/smoke_native_cli.py:/smoke.py:ro" \
             vm2api-native-cli-ci /smoke.py
+      - name: offline rebuilt ARM64 worker OAuth contracts
+        run: |
+          docker run --rm --network none --read-only --cpus 2 --memory 512m \
+            --tmpfs /tmp:rw,exec,size=128m \
+            --entrypoint python3 -v "$PWD/test/deploy/smoke_worker_oauth.py:/worker-smoke.py:ro" \
+            vm2api-native-cli-ci /worker-smoke.py /opt/vm2api/image-bin/kin-worker
