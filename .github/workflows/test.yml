@@ -128,6 +128,7 @@ jobs:
         run: CGO_ENABLED=0 go build -buildvcs=false -trimpath -o "$RUNNER_TEMP/worker-from-source" ./cmd/kin-worker
       - name: offline pinned and rebuilt AMD64 worker OAuth contracts
         run: |
+          set -euo pipefail
           docker run --rm --network none --read-only --user 1000:1000 --cpus 2 --memory 512m \
             --tmpfs /tmp:rw,exec,size=128m,uid=1000,gid=1000 \
             -v "$PWD:/candidate:ro" -v "$RUNNER_TEMP/worker-from-source:/worker-from-source:ro" \
