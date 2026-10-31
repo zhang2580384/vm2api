@@ -123,7 +123,9 @@ async function runUpgrade({ source = true, arch = 'amd64', override, env = {} } 
             VM2API_API_KEY: 'test-key',
             ...env,
           },
-          timeout: 20000,
+          // Failure cases perform all 45 checks. Even with fake sleep, spawning
+          // Node for each check can exceed 20s on the isolated two-CPU runner.
+          timeout: 60000,
         })),
         code: 0,
       }

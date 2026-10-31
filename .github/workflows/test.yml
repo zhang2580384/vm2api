@@ -66,6 +66,8 @@ jobs:
       - run: npm run test:unit
       - name: offline backup and cloud restore end-to-end
         run: node --test test/e2e/backup.e2e.test.mjs test/e2e/panel-proxy-domain-forward.e2e.test.mjs
+      - name: protocol configuration and count-tokens HTTP compatibility
+        run: node --test test/e2e/persona-migration.e2e.test.mjs
       - name: go vet and test
         run: |
           (cd worker && go vet ./... && go test ./...)
@@ -91,6 +93,51 @@ jobs:
           pnpm format:check
           pnpm test
           pnpm build
+
+  protocol-native-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: fetch and verify both exact payload baselines
+        run: |
+          node scripts/fetch-payload.mjs
+          node scripts/fetch-payload.mjs --check
+          mkdir "$RUNNER_TEMP/previous-vm2api"
+          git archive 3f883cba6b34fbee71d75de1e41c139767e2ddce | tar -x -C "$RUNNER_TEMP/previous-vm2api"
+          node scripts/fetch-payload.mjs --manifest "$RUNNER_TEMP/previous-vm2api/deploy/payload.json" --dest "$RUNNER_TEMP/previous-vm2api"
+          node scripts/fetch-payload.mjs --check --manifest "$RUNNER_TEMP/previous-vm2api/deploy/payload.json" --dest "$RUNNER_TEMP/previous-vm2api"
+          cp bin/kin-kernel share/wrap-cli/kin-kernel.bin
+          cp "$RUNNER_TEMP/previous-vm2api/bin/kin-kernel" "$RUNNER_TEMP/previous-vm2api/share/wrap-cli/kin-kernel.bin"
+          mkdir -p "$RUNNER_TEMP/previous-vm2api/node_modules"
+          mkdir "$RUNNER_TEMP/protocol-evidence"
+          chmod 0777 "$RUNNER_TEMP/protocol-evidence"
+      - name: offline native HTTP and complete state rollback
+        run: |
+          docker run --rm --network none --read-only --user 1000:1000 --cpus 2 --memory 3g --pids-limit 512 \
+            --tmpfs /tmp:rw,exec,size=2g,uid=1000,gid=1000 \
+            -v "$PWD:/candidate:ro" -v "$RUNNER_TEMP/previous-vm2api:/previous:ro" \
+            -v "$PWD/node_modules:/previous/node_modules:ro" \
+            -v "$RUNNER_TEMP/protocol-evidence:/evidence:rw" \
+            -w /candidate -e NODE_ENV=test -e KIN_PREVIOUS_SOURCE=/previous \
+            -e KIN_303_KERNEL=/candidate/share/wrap-cli/kin-kernel \
+            -e KIN_303_CLI=/candidate/share/wrap-cli/cli-node \
+            -e KIN_PROTOCOL_EVIDENCE_DIR=/evidence \
+            --entrypoint node node:22-bookworm-slim \
+            --test --test-reporter=tap test/e2e/protocol-native-matrix.e2e.test.mjs test/e2e/protocol-rollback.e2e.test.mjs
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: protocol-native-evidence
+          path: ${{ runner.temp }}/protocol-evidence
+          if-no-files-found: ignore
 
   arm64-native-cli:
     runs-on: ubuntu-24.04-arm

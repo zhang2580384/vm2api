@@ -35,7 +35,13 @@ function snapshot(file, bytes) {
     regularFile(path.join(target, 'manifest.json'))
     const saved = fs.readFileSync(path.join(target, 'routing.json'))
     const manifest = JSON.parse(fs.readFileSync(path.join(target, 'manifest.json'), 'utf8'))
-    if (digest(saved) !== id || manifest.sha256 !== id) throw failure('Protocol snapshot checksum mismatch')
+    if (
+      digest(saved) !== id ||
+      manifest.sha256 !== id ||
+      manifest.version !== 1 ||
+      manifest.migration !== 'official-303-to-full'
+    )
+      throw failure('Protocol snapshot checksum mismatch')
     return id
   }
   const stage = fs.mkdtempSync(path.join(root, '.creating-'))
@@ -100,7 +106,12 @@ export function restorePersonaConfigFile(file, id) {
   regularFile(meta)
   const bytes = fs.readFileSync(source)
   const manifest = JSON.parse(fs.readFileSync(meta, 'utf8'))
-  if (digest(bytes) !== id || manifest.sha256 !== id || manifest.migration !== 'official-303-to-full')
+  if (
+    digest(bytes) !== id ||
+    manifest.sha256 !== id ||
+    manifest.version !== 1 ||
+    manifest.migration !== 'official-303-to-full'
+  )
     throw failure('Protocol snapshot checksum mismatch')
   JSON.parse(bytes.toString('utf8'))
   regularFile(file)

@@ -1,8 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
 import { startRealChain } from './helpers/real-chain.mjs'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { OFFICIAL_AUTO_MODE_REMINDER } from '../../src/lib/protocol/auto-mode-reminder.mjs'
 
 const kernelBin = process.env.KIN_303_KERNEL
 const cliBin = process.env.KIN_303_CLI
@@ -33,6 +36,8 @@ for (const preset of ['zero', 'official', 'official_full']) {
     timeout: 180000,
   }, async () => {
     const chain = await startRealChain({ kernelBin, cliBin, preset })
+    const differences = []
+    const evidence = []
     try {
       for (const entry of ttlCases) {
         chain.setCacheTtl(entry.menu)
@@ -79,10 +84,11 @@ for (const preset of ['zero', 'official', 'official_full']) {
           if (turn) assert.ok(wire.includes(`FICTIONAL_NEXT_${turn}`))
           const controls = markers(response.body)
           assert.ok(controls.length >= 1 && controls.length <= 4)
-          assert.ok(
-            controls.every((control) => control.type === 'ephemeral' && control.ttl === entry.expected),
-            JSON.stringify({ entry, controls }),
-          )
+          const row = { preset, entry, turn, controls, node_body: chain.logs.at(-1)?.outbound_body }
+          evidence.push(row)
+          if (!controls.every((control) => control.type === 'ephemeral' && control.ttl === entry.expected)) {
+            differences.push({ entry, turn, controls })
+          }
           const harness = response.body.system
             .slice(1)
             .filter((block) => !String(block.text).includes(staticText))
@@ -97,7 +103,15 @@ for (const preset of ['zero', 'official', 'official_full']) {
           )
         }
       }
+      assert.deepEqual(differences, [], 'Final native TTL differs from the requested cache policy')
     } finally {
+      if (process.env.KIN_PROTOCOL_EVIDENCE_DIR) {
+        fs.mkdirSync(process.env.KIN_PROTOCOL_EVIDENCE_DIR, { recursive: true })
+        fs.writeFileSync(
+          path.join(process.env.KIN_PROTOCOL_EVIDENCE_DIR, `${preset}-native-cache.json`),
+          JSON.stringify(evidence, null, 2),
+        )
+      }
       await chain.close()
     }
   })
@@ -148,6 +162,36 @@ test('native reasoning and forced-tool contracts retain caller effort, strictnes
     assert.equal(rejected.status, 400, rejected.response)
     assert.equal(rejected.count, 0)
     assert.match(rejected.response, /tool_choice_incompatible/)
+  } finally {
+    await chain.close()
+  }
+})
+
+test('native CLI retains one exact official auto-mode reminder and removes obsolete echoes', {
+  skip: !enabled,
+  timeout: 60000,
+}, async () => {
+  const chain = await startRealChain({ kernelBin, cliBin, preset: 'zero' })
+  try {
+    const old = '<system-reminder>\nAuto mode still active (reported by harness).\n</system-reminder>'
+    const response = await chain.send({
+      request: {
+        path: '/v1/messages',
+        body: {
+          model: 'claude-haiku-5-5',
+          max_tokens: 256,
+          stream: true,
+          messages: [{ role: 'user', content: `${old}\n${old}\nFICTIONAL_CONTINUE` }],
+        },
+      },
+    })
+    assert.equal(response.status, 200, response.response)
+    const wire = JSON.stringify(response.body)
+    const exact = JSON.stringify(OFFICIAL_AUTO_MODE_REMINDER).slice(1, -1)
+    assert.equal(wire.split(exact).length - 1, 1)
+    assert.equal(wire.includes('reported by harness'), false)
+    assert.equal(wire.includes('Auto mode is active. The user chose continuous, autonomous execution.'), false)
+    assert.equal(wire.includes('FICTIONAL_CONTINUE'), true)
   } finally {
     await chain.close()
   }

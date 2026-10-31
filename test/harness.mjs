@@ -66,6 +66,7 @@ export function seedVm({ project, id = 'vm-sim-01', oauth = true } = {}) {
 }
 
 export async function startGateway(opts = {}) {
+  const sourceRoot = opts.sourceRoot ? path.join(path.resolve(opts.sourceRoot), 'src') : GATEWAY_ROOT
   const project = opts.project || fs.mkdtempSync(path.join(os.tmpdir(), 'kin-sim-'))
   const captures = path.join(project, 'captures')
   const dataDir = path.join(project, 'data')
@@ -77,7 +78,7 @@ export async function startGateway(opts = {}) {
   const routingFile = path.join(project, 'config', 'routing.json')
   if (!fs.existsSync(routingFile)) {
     fs.mkdirSync(path.dirname(routingFile), { recursive: true })
-    fs.copyFileSync(path.join(GATEWAY_ROOT, 'config', 'routing.json'), routingFile)
+    fs.copyFileSync(path.join(sourceRoot, 'config', 'routing.json'), routingFile)
   }
   const port = opts.port || (await pickFreePort())
   const traceFile = opts.traceFile || path.join(project, 'mock-trace.json')
@@ -107,9 +108,9 @@ export async function startGateway(opts = {}) {
   }
   if (opts.env) Object.assign(env, opts.env)
 
-  const child = spawn(process.execPath, [path.join(GATEWAY_ROOT, 'server.mjs')], {
+  const child = spawn(process.execPath, [path.join(sourceRoot, 'server.mjs')], {
     env,
-    cwd: GATEWAY_ROOT,
+    cwd: sourceRoot,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let stdout = ''
@@ -152,10 +153,17 @@ export async function startGateway(opts = {}) {
     stdout: () => stdout,
     stderr: () => stderr,
     async stop() {
-      if (child.exitCode == null) {
+      if (child.exitCode == null && child.signalCode == null) {
+        const closed = new Promise((resolve) => child.once('exit', resolve))
         child.kill('SIGTERM')
-        await new Promise((r) => setTimeout(r, 150))
-        if (child.exitCode == null) child.kill('SIGKILL')
+        const force = setTimeout(() => {
+          if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL')
+        }, 150)
+        try {
+          await closed
+        } finally {
+          clearTimeout(force)
+        }
       }
     },
   }
