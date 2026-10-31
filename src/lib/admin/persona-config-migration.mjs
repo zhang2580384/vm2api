@@ -84,7 +84,7 @@ export function migratePersonaConfigFile(file) {
   if (!legacy) return { changed: false, document: doc }
   const id = snapshot(file, bytes)
   const next = { ...doc, compatibility: migratePersonaCompatibility(compat) }
-  // The original byte snapshot is durable before the live configuration changes.
+  // The original byte snapshot is complete before the live configuration changes.
   atomicWriteJson(file, next, { mode: 0o600 })
   return { changed: true, snapshot: id, document: next }
 }
