@@ -41,10 +41,12 @@ function limitResult(message) {
   }
 }
 
-test('plan limit writes rate_limit_reset_at from the text and survives a passive Extra re-read', () => {
+test('plan limit writes rate_limit_reset_at from the text and survives a passive Extra re-read', (t) => {
+  // Freeze an ordinary day: a local "tomorrow 11am" can be 25h away at DST fall-back.
+  const now = Date.parse('2026-10-30T15:01:00Z')
+  t.mock.method(Date, 'now', () => now)
   const { service, runtimeRepo, accountQuota, probes, close } = setup()
   try {
-    const now = Date.now()
     const block = service.handleUpstreamError({
       accountId: 'acc-1',
       vmId: 'vm-01',
@@ -67,6 +69,46 @@ test('plan limit writes rate_limit_reset_at from the text and survives a passive
     close()
   }
 })
+
+for (const { name, nowIso, resetIso } of [
+  {
+    name: 'fall-back',
+    nowIso: '2026-10-31T15:01:00Z',
+    resetIso: '2026-11-01T16:00:00Z',
+  },
+  {
+    name: 'spring-forward',
+    nowIso: '2026-03-07T16:01:00Z',
+    resetIso: '2026-03-08T15:00:00Z',
+  },
+]) {
+  test(`plan limit preserves New York wall-clock reset across DST ${name}`, (t) => {
+    const now = Date.parse(nowIso)
+    t.mock.method(Date, 'now', () => now)
+    const { service, runtimeRepo, accountQuota, probes, close } = setup()
+    try {
+      const block = service.handleUpstreamError({
+        accountId: 'acc-1',
+        vmId: 'vm-01',
+        result: limitResult("provider error: You've hit your limit · resets 11am (America/New_York)"),
+        policy: quotaPolicy,
+        now,
+      })
+      assert.equal(block.kind, 'rate_limited')
+      assert.equal(block.fallback, false)
+      assert.equal(block.until, Date.parse(resetIso))
+      assert.deepEqual(hardBlockOf(runtimeRepo.get('acc-1'), now), {
+        reason: 'rate_limited',
+        until: Date.parse(resetIso),
+      })
+      accountQuota.clearQuotaExhaustedCooldown('acc-1')
+      assert.equal(runtimeRepo.get('acc-1').rate_limit_reset_at, Date.parse(resetIso))
+      assert.deepEqual(probes, [])
+    } finally {
+      close()
+    }
+  })
+}
 
 test('plan limit without any reset falls back to the configured cooldown and asks for one /usage hop', () => {
   const { service, runtimeRepo, probes, close } = setup({ fallback_cooldown_min: 30 })
