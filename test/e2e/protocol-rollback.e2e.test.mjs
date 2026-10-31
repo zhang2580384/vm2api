@@ -32,6 +32,16 @@ function verifyPayload(root) {
   return manifest.release
 }
 
+function writableSource(original, destination) {
+  // Both source mounts stay read-only. Startup writes a public configuration
+  // snapshot beside src, so use private tmp copies for the exact source trees.
+  fs.cpSync(path.join(original, 'src'), path.join(destination, 'src'), { recursive: true })
+  for (const file of ['VERSION', 'package.json'])
+    fs.copyFileSync(path.join(original, file), path.join(destination, file))
+  fs.symlinkSync(path.join(original, 'node_modules'), path.join(destination, 'node_modules'), 'junction')
+  return destination
+}
+
 test('v2.4.4 source, database, configuration and pinned payload remain usable after an isolated full-state rollback', {
   skip: !previous,
   timeout: 120000,
@@ -41,6 +51,8 @@ test('v2.4.4 source, database, configuration and pinned payload remain usable af
   assert.equal(verifyPayload(REPO_ROOT), 'payload-2026.10.29-telemetry-kernel')
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fictional-protocol-rollback-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const oldSource = writableSource(previous, path.join(root, 'old-source'))
+  const candidateSource = writableSource(REPO_ROOT, path.join(root, 'candidate-source'))
   const project = path.join(root, 'instance')
   const saved = path.join(root, 'pre-upgrade-state')
   const vm = seedVm({ project })
@@ -61,7 +73,7 @@ test('v2.4.4 source, database, configuration and pinned payload remain usable af
   fs.writeFileSync(routingFile, JSON.stringify(routing, null, '\t') + '\r\n')
   let gw
   try {
-    gw = await startGateway({ project, sourceRoot: previous, env: payloadEnv(previous) })
+    gw = await startGateway({ project, sourceRoot: oldSource, env: payloadEnv(previous) })
     const originalKey = await api(gw, 'POST', '/api/panel/api-keys', { body: { name: 'FICTIONAL_KEEP' } })
     assert.equal(originalKey.status, 201, originalKey.text)
     assert.equal((await api(gw, 'GET', '/api/panel/routing')).json.data.compatibility.persona_preset, 'official_303')
@@ -77,7 +89,7 @@ test('v2.4.4 source, database, configuration and pinned payload remain usable af
     db.close()
     fs.cpSync(project, saved, { recursive: true })
 
-    gw = await startGateway({ project, env: payloadEnv(REPO_ROOT) })
+    gw = await startGateway({ project, sourceRoot: candidateSource, env: payloadEnv(REPO_ROOT) })
     const upgraded = await api(gw, 'GET', '/api/panel/routing')
     assert.equal(upgraded.json.data.compatibility.persona_preset, 'official_full')
     assert.equal(upgraded.json.data.compatibility.persona_templates.official_full[0].text, 'FICTIONAL_303_ACTIVE')
@@ -105,7 +117,7 @@ test('v2.4.4 source, database, configuration and pinned payload remain usable af
     fs.cpSync(saved, project, { recursive: true })
     assert.deepEqual(fs.readFileSync(routingFile), originalRouting)
     verifyPayload(previous)
-    gw = await startGateway({ project, sourceRoot: previous, env: payloadEnv(previous) })
+    gw = await startGateway({ project, sourceRoot: oldSource, env: payloadEnv(previous) })
     const restored = (await api(gw, 'GET', '/api/panel/routing')).json.data.compatibility
     assert.equal(restored.persona_preset, 'official_303')
     assert.equal(restored.persona_templates.official_303[0].text, 'FICTIONAL_303_ACTIVE')
