@@ -271,8 +271,8 @@ function ephemeralCacheText(body = {}) {
 
 /**
  * Pool seat identity: one key per client session. A session that lands on a
- * VM holds it while requests are active or successors queue on that VM.
- * Sticky TTL remembers the VM without holding a seat. Precedence: caller session (metadata.user_id, then
+ * VM keeps that slot until sticky TTL, or until the home is unschedulable /
+ * an error moves it. Precedence: caller session (metadata.user_id, then
  * `x-session-id` and the other caller session headers/body keys) → device id
  * (no session) → short one-shot probe (no seat) → hash of
  * `cache_control: ephemeral` content → hash of client IP + normalized UA +

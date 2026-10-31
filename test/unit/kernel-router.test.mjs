@@ -770,7 +770,7 @@ test('writeKernelConfig uses identity when official_full has no persona_inject',
   assert.equal(overridden.system_layout, 'zero')
 })
 
-test('kernel.json rename uses slot gid for root and control-plane gid for non-root', () => {
+test('kernel.json rename keeps the control-plane gid while adopting the slot uid', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-owner-'))
   const vm = { id: 'vm-10', inference_engine: 'rust' }
   const owner = slotRuntimeOwner(vm)
@@ -793,7 +793,7 @@ test('kernel.json rename uses slot gid for root and control-plane gid for non-ro
     const changed = writeKernelConfig(root, vm, { token: 'tok', routing: full })
     assert.equal(changed.changed, true)
     const published = kernelOwned()
-    const controlGid = process.getuid() === 0 ? owner.gid : process.getgid()
+    const controlGid = process.getgid()
     assert.ok(published.length >= 1)
     assert.ok(
       published.every((call) => call.uid === owner.uid && call.gid === controlGid),

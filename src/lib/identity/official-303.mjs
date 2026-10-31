@@ -1,15 +1,16 @@
 /**
  * official_303 preset, lean models only: the single assembler of system,
- * messages and markers for the cli-hop. Shape follows the 2.1.303 capture:
+ * messages and markers for the cli-hop. Shape follows the official --print capture:
  *
  *   system[0] billing (no marker)
- *   system[1] identity (marker)
- *   system[2] lean main prompt (marker)
+ *   system[1] identity (no marker)
+ *   system[2] harness (marker; 1h also carries scope global)
+ *   system[3] guidance (marker)
  *   first user: <system-reminder> with non-official caller system, then the turn
  *   last user, and the user before it once there are 4+ messages: last non-thinking block marked
  *   trailing role=system: Environment (no marker, after the last marker)
  *
- * The caller's markers never reach the wire. Every marker uses the panel TTL.
+ * The caller's markers never reach the wire. Marker TTL comes from the panel.
  * Pure: the input body is not mutated.
  */
 import { extractInboundEnvironmentSection, parseInboundEnvFacts } from './official-cc-system-2.1.241.mjs'
@@ -19,6 +20,7 @@ import {
   agentStandingVar,
   renderPersonaTemplate,
   resolvePersonaTemplate,
+  selectedTemplateBlocks,
 } from './persona-template.mjs'
 import {
   OFFICIAL_PROFILES,
@@ -56,8 +58,9 @@ function messageTexts(message) {
   return content.filter((block) => block?.type === 'text' && typeof block.text === 'string').map((block) => block.text)
 }
 
-function panelMarker(ttl) {
-  return normalizeCacheTtl(ttl) === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' }
+function panelMarker(ttl, { scope = false } = {}) {
+  const hour = normalizeCacheTtl(ttl) === '1h'
+  return hour ? { type: 'ephemeral', ttl: '1h', ...(scope ? { scope: 'global' } : {}) } : { type: 'ephemeral' }
 }
 
 function withoutCacheControl(node) {
@@ -76,11 +79,11 @@ function stripMessageMarkers(messages) {
   })
 }
 
-/** Billing never carries a marker; template markers take the panel TTL; at most `budget` stay (latest kept). */
-function systemWithPanelMarkers(blocks, marker, budget) {
+/** Billing never carries a marker. A template scope stays only on a 1h marker. */
+function systemWithPanelMarkers(blocks, ttl, budget) {
   const next = blocks.map((block) => {
-    if (isBillingText(block.text)) return withoutCacheControl(block)
-    return block.cache_control ? { ...block, cache_control: { ...marker } } : block
+    if (isBillingText(block.text) || !block.cache_control) return withoutCacheControl(block)
+    return { ...block, cache_control: panelMarker(ttl, { scope: block.cache_control.scope === 'global' }) }
   })
   for (let i = next.length - 1; i >= 0; i--) {
     if (!next[i].cache_control) continue
@@ -224,6 +227,7 @@ export function renderOfficial303Body(
     firstUserText = '',
     sessionId = '',
     oneM = false,
+    entrypoint = 'sdk-cli',
   } = {},
 ) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) return body
@@ -245,8 +249,16 @@ export function renderOfficial303Body(
     agentStanding: agentStandingVar(compat, OFFICIAL_303_PRESET),
     withEnv: true,
     model,
+    compat,
+    preset: OFFICIAL_303_PRESET,
+    entrypoint,
   })
-  let system = renderPersonaTemplate(resolvePersonaTemplate(OFFICIAL_303_PRESET, compat?.persona_templates), vars)
+  const template = selectedTemplateBlocks(
+    resolvePersonaTemplate(OFFICIAL_303_PRESET, compat?.persona_templates),
+    compat,
+    OFFICIAL_303_PRESET,
+  ).filter((block) => block?.id !== 'caller_system')
+  let system = renderPersonaTemplate(template, vars)
 
   let messages = stripMessageMarkers(body.messages).map((message) =>
     message?.role === 'system' ? officialSystemContent(message) : message,
@@ -269,11 +281,11 @@ export function renderOfficial303Body(
       if (at >= 0) messages.splice(at + 1, 0, { role: 'system', content: requestEnvironment })
     }
   } else {
-    // Official merges the session sections into the main block when role=system is unavailable.
-    const main = system.length - 1
-    if (main >= 0 && !isBillingText(system[main].text)) {
+    // Official merges the session sections into guidance when role=system is unavailable.
+    const guidance = system.findLastIndex((block) => block?.cache_control && !isBillingText(block.text))
+    if (guidance >= 0) {
       system = system.map((block, i) =>
-        i === main ? { ...block, text: `${block.text}\n\n${requestEnvironment}` } : block,
+        i === guidance ? { ...block, text: `${block.text}\n\n${requestEnvironment}` } : block,
       )
     }
   }
@@ -286,7 +298,7 @@ export function renderOfficial303Body(
   const marked = markLastUsers(out.messages, marker)
   out = {
     ...out,
-    system: systemWithPanelMarkers(out.system, marker, PROFILE.maxMarkers - marked.count),
+    system: systemWithPanelMarkers(out.system, cacheTtl, PROFILE.maxMarkers - marked.count),
     messages: marked.messages,
   }
   return orderTopLevel(out)

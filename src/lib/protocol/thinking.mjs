@@ -230,6 +230,12 @@ export function ensureUnofficialAdaptiveThinking(body = {}) {
   if (!thinkingNeedsOfficialDisplay(body.thinking)) return body
   return { ...body, thinking: { ...body.thinking, display: OFFICIAL_THINKING_DISPLAY } }
 }
+/** Official --print fill: a missing thinking object becomes adaptive/omitted. Caller thinking is left alone. */
+export function ensureOfficialPrintThinking(body = {}) {
+  if (!body || typeof body !== 'object' || body.thinking != null) return body
+  if (!modelSupportsAdaptiveThinking(body.model)) return body
+  return { ...body, thinking: { type: 'adaptive', display: OFFICIAL_THINKING_DISPLAY } }
+}
 
 export function modelSupportsEffort(model = '') {
   try {

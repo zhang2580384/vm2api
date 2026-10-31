@@ -247,6 +247,7 @@ import {
 import { collectSlotIdentity } from '../vm/guest-identity.mjs'
 import { applyOfficialFingerprintToVm, reconcileOfficialFingerprints } from '../identity/official-fingerprint.mjs'
 import { personaPreviewVars } from '../identity/crs-persona.mjs'
+import { canonicalPersonaCompat } from '../identity/persona-template.mjs'
 import { buildOutboundProfile } from './outbound-profile.mjs'
 import {
   applyGeneratedFingerprint,
@@ -5304,7 +5305,11 @@ export function createPanelHandler(ctx) {
 
       // GET /api/panel/routing
       if (req.method === 'GET' && p === '/api/panel/routing') {
-        return json(res, 200, panel.buildRouting({ routingConfig: ctx.routingConfig, stickyRouter }))
+        const routingConfig = {
+          ...ctx.routingConfig,
+          compatibility: canonicalPersonaCompat(ctx.routingConfig?.compatibility),
+        }
+        return json(res, 200, panel.buildRouting({ routingConfig, stickyRouter }))
       }
       // GET /api/panel/outbound-profile — read-only outbound reference for the global preset
       if (req.method === 'GET' && p === '/api/panel/outbound-profile') {
@@ -5318,6 +5323,7 @@ export function createPanelHandler(ctx) {
       // PUT /api/panel/routing
       if (req.method === 'PUT' && p === '/api/panel/routing') {
         const body = await readBody(req, cfg.limits.max_body_bytes)
+        if (body?.compatibility) body.compatibility = canonicalPersonaCompat(body.compatibility)
         const previousRoutingConfig = structuredClone(ctx.routingConfig)
         try {
           if (body?.codex && Object.prototype.hasOwnProperty.call(body.codex, 'quota')) {

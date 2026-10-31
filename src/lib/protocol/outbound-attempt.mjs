@@ -14,13 +14,7 @@ import {
   modelSupportsMidConversationSystem,
 } from './anthropic-policy.mjs'
 import { liftMidConversationSystemMessages, promoteContentToBlocks } from './sanitize.mjs'
-import {
-  applyThinkingDisplay,
-  ensureUnofficialAdaptiveThinking,
-  ensureUnofficialEffortHigh,
-  normalizeThinkingForModel,
-  thinkingDisplayMode,
-} from './thinking.mjs'
+import { applyThinkingDisplay, thinkingDisplayMode } from './thinking.mjs'
 import { ensureOutputConfigSchema } from './request-rectifier.mjs'
 import {
   applyCrsIdentityReplace,
@@ -35,6 +29,7 @@ import {
   refreshOfficialSystemEnvironment,
   hasEnvironmentSection,
   stampBillingPromptId,
+  stripSubagentBilling,
   collapseSystemBudgetReminders,
   CRS_OFFICIAL_SYSTEM,
   CRS_OFFICIAL_CLI_SYSTEM,
@@ -57,7 +52,7 @@ import {
   validateCacheBreakpoints,
 } from './cache-ttl.mjs'
 import { apiKeyBetaHeader, setupTokenBetaHeader } from './claude-code-betas.mjs'
-import { applyModelRequestRules } from './model-policy.mjs'
+
 import { isApiKeyMode, isAnySetupTokenMode } from '../oauth/credential-mode.mjs'
 import { prepareClassifierBody } from './request-purpose.mjs'
 
@@ -73,7 +68,7 @@ function systemBlockText(block) {
 export function isCliOwnedSystemText(text) {
   const t = String(text || '').trim()
   if (!t) return true
-  if (/^x-anthropic-billing-header/i.test(t)) return true
+  if (/^x-anthropic-billing-header/i.test(t)) return !/prompt_version=</.test(t)
   if (t.startsWith('# Environment')) return true
   if (t === CLI_IDENTITY || t === CRS_OFFICIAL_SYSTEM || t === CRS_OFFICIAL_AGENT_IDENTITY) return true
   if (t === CRS_COMPACT_IDENTITY || t === CRS_OFFICIAL_CLI_SYSTEM) return true
@@ -313,8 +308,16 @@ export function prepareCliHopBody(
   // Official family keeps the inbound system and its markers. Rewriting them
   // into the persona template (billing / reporting / 1h) is what diverges from
   // the captured Claude Code body: two ephemeral blocks, TTL omitted.
+  const assembledTemplate = (system) => {
+    const blocks = Array.isArray(system) ? system : []
+    const texts = blocks.map(textOf)
+    return (
+      texts.some((text) => text.trim() === '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__') ||
+      texts.some((text) => /^x-anthropic-billing-header/i.test(text) && /prompt_version=</.test(text))
+    )
+  }
   if (!preserveSystem) {
-    if (!lean) {
+    if (!lean && !assembledTemplate(body.system)) {
       const leftover = stripCliOwnedSystem(body.system, { preserveCallerEnvironment })
       if (leftover == null) delete body.system
       else body.system = leftover
@@ -326,36 +329,30 @@ export function prepareCliHopBody(
   if (!lean && !modelSupportsMidConversationSystem(body.model)) body = liftMidConversationSystemMessages(body)
   if (!preserveSystem && !lean) body = collapseSystemBudgetReminders(body)
 
-  if (!repaired) {
-    normalizeThinkingForModel(body)
-    body = pinHaikuCliThinking(body)
-    body = ensureUnofficialEffortHigh(body)
-  }
+  // Native cli-node applies model policy and the medium effort default.
+  // Explicit sampling fields stay omitted or present exactly as the caller sent them.
   body = applyThinkingDisplay(body, thinkingDisplayMode(routing))
+  body = stripSubagentBilling(body)
   body = stripInvalidThinkingBlocks(body, { preserveThinkingBlocks })
-  body = applyModelRequestRules(body)
   body = ensureOutputConfigSchema(body)
-  // Lean keeps the caller's explicit official conditional fields; it never adds them.
-  if (!lean && Object.prototype.hasOwnProperty.call(body, 'temperature')) delete body.temperature
-  if (Object.prototype.hasOwnProperty.call(body, 'top_p')) delete body.top_p
-  if (Object.prototype.hasOwnProperty.call(body, 'top_k')) delete body.top_k
-  if (!lean && Object.prototype.hasOwnProperty.call(body, 'context_management')) delete body.context_management
+
   if (Object.prototype.hasOwnProperty.call(body, 'cache_control')) delete body.cache_control
   if (!requestContext) {
-    if (!lean) {
+    const preparedZero =
+      Array.isArray(body.system) &&
+      body.system.some(
+        (block) => /^x-anthropic-billing-header/i.test(textOf(block)) && /prompt_version=</.test(textOf(block)),
+      )
+    const shaped =
+      Array.isArray(body.system) &&
+      body.system.some((block) => textOf(block).trim() === '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
+    if (!lean && !shaped && !preparedZero) {
       body = { ...body, system: officialSystemTemplate(body.system, cacheTtl) }
       body.messages = officialMessageMarker(body.messages, cacheTtl)
     }
     if (Array.isArray(body.tools)) body = { ...body, tools: stripEagerInputStreaming(body.tools) }
   }
   return body
-}
-/** Only legacy Haiku rejects thinking; Haiku 5.5 supports adaptive thinking. */
-export function pinHaikuCliThinking(body = {}) {
-  if (!body || typeof body !== 'object') return body
-  const model = String(body.model || '')
-  if (!/haiku/i.test(model) || /haiku-5/i.test(model)) return body
-  return { ...body, thinking: { type: 'disabled' } }
 }
 
 export function prepareOutboundAttempt({

@@ -13,6 +13,7 @@ import { createHandleProtocol } from '../../../src/lib/protocol/handle-protocol.
 import { createRespond, readBody } from '../../../src/lib/http/respond.mjs'
 import { rememberRustHealth, clearRustHealthCache } from '../../../src/lib/transport/kernel-router.mjs'
 import { profileForPreset } from '../../../src/lib/identity/official-profiles.mjs'
+import { ccEntrypointFromRouting } from '../../../src/lib/identity/crs-persona.mjs'
 
 const PROTOCOL_BY_PATH = {
   '/v1/messages': 'anthropic.messages',
@@ -134,9 +135,12 @@ export async function startRealChain({
       slots_per_worker: 2,
       system_layout: 'identity',
       persona_preset: presetNow,
-      // Same projection as writeKernelConfig.
+      // Same projection as writeKernelConfig: cli-node hot-reads this for UA and billing.
       cli_version: profileForPreset(presetNow).cliVersion,
       default_cache_ttl: ttlNow,
+      cc_entrypoint: ccEntrypointFromRouting(
+        routingBase || { compatibility: { persona_preset: presetNow, cache_ttl: ttlNow } },
+      ),
       cch_enabled: true,
       timezone,
       test_endpoints: true,

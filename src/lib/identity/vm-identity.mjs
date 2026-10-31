@@ -31,9 +31,9 @@ export const OFFICIAL_STAINLESS = Object.freeze({
   stainless_package_version: '0.128.0',
 })
 
-export function officialClaudeCliUa(version = OFFICIAL_CLI_VERSION) {
+export function officialClaudeCliUa(version = OFFICIAL_CLI_VERSION, entrypoint = 'sdk-cli') {
   const m = String(version || '').match(/(\d+\.\d+\.\d+)/)
-  return `claude-cli/${m ? m[1] : OFFICIAL_CLI_VERSION} (external, sdk-cli)`
+  return `claude-cli/${m ? m[1] : OFFICIAL_CLI_VERSION} (external, ${entrypoint === 'cli' ? 'cli' : 'sdk-cli'})`
 }
 
 export function formatMetadataUserId({ deviceId, accountUuid, sessionId }) {

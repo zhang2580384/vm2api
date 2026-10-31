@@ -40,9 +40,10 @@ export function OutboundReference() {
             value={`${personaPresetLabel(profile.preset as PersonaPreset)}（${profile.preset}）`}
           />
           <Row label='User-Agent' value={profile.user_agent} />
+          <Row label='cc_entrypoint' value={profile.cc_entrypoint} />
           <Row
             label='billing'
-            value={`cc_version=${profile.cli_version}.<fingerprint>`}
+            value={`cc_version=${profile.cli_version}.<fingerprint>; cc_entrypoint=${profile.cc_entrypoint}`}
           />
           <Row
             label={`anthropic-beta（OAuth · ${profile.beta_sample_model}）`}

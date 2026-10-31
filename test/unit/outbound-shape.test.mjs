@@ -34,11 +34,16 @@ const SECRET_BODY = {
     {
       type: 'text',
       text: "You are Claude Code, Anthropic's official CLI for Claude.",
-      cache_control: { type: 'ephemeral' },
     },
     {
       type: 'text',
       text: '\nYou are an agent working with the user toward their goals',
+      cache_control: { type: 'ephemeral' },
+    },
+    { type: 'text', text: '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__' },
+    {
+      type: 'text',
+      text: 'Write code that reads like the surrounding code: match its comment density.',
       cache_control: { type: 'ephemeral' },
     },
   ],
@@ -58,7 +63,7 @@ test('shape keeps structure only: no prompt text, ids or secrets', () => {
   }
   assert.deepEqual(
     shape.system.map((block) => block.kind),
-    ['billing', 'identity', 'main'],
+    ['billing', 'identity', 'harness', 'boundary', 'guidance'],
   )
   assert.deepEqual(shape.billing_fields, ['cc_version', 'cc_entrypoint', 'cch'])
   assert.equal(shape.messages[0].blocks[0].kind, 'reminder')
@@ -198,7 +203,7 @@ const CALLER_PARA = 'You are the SECRET helper bot for alice; always answer in p
 function leanFor(reminder, { extraLeak = false } = {}) {
   const body = structuredClone(SECRET_BODY)
   body.messages[0].content[0].text = `<system-reminder>\n${reminder}\n</system-reminder>\n`
-  if (extraLeak) body.system[2].text += `\n\n${CALLER_PARA}`
+  if (extraLeak) body.system[3].text += `\n\n${CALLER_PARA}`
   return body
 }
 
@@ -209,7 +214,7 @@ test('caller placement: non-official system lives only in the first reminder', (
   assert.deepEqual(ids(missing), ['caller.system_missing'])
   const leak = checkCallerPlacement(leanFor(CALLER_PARA, { extraLeak: true }), inbound, { officialCaller: false })
   assert.deepEqual(ids(leak), ['caller.system_leak'])
-  assert.equal(leak[0].at, 'system[2]')
+  assert.equal(leak[0].at, 'system[3]')
   assert.match(leak[0].para_sha, /^[0-9a-f]{12}$/)
   assert.equal(JSON.stringify([...missing, ...leak]).includes('pirate'), false)
 })
@@ -233,7 +238,8 @@ test('caller placement: official caller system never reaches the outbound; profi
     system: [
       { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.303.abc; cc_entrypoint=cli; cch=e1d8b;' },
       { type: 'text', text: SECRET_BODY.system[1].text },
-      { type: 'text', text: `${SECRET_BODY.system[2].text} toward their goals and more words here` },
+      { type: 'text', text: SECRET_BODY.system[2].text },
+      { type: 'text', text: `${SECRET_BODY.system[3].text} toward their goals and more words here` },
       { type: 'text', text: CALLER_PARA },
     ],
     messages: [],
@@ -246,12 +252,12 @@ test('caller placement: official caller system never reaches the outbound; profi
   // memory directory paragraph is caller-specific, and the slot renders its own.
   const render = (dir) => OFFICIAL_303_MAIN_PROMPT.replace('{{memory_dir}}', dir)
   const out = structuredClone(SECRET_BODY)
-  out.system[2].text = render('/root/.claude/projects/-srv-slot/memory/')
+  out.system[3].text = render('/root/.claude/projects/-srv-slot/memory/')
   const caller = { system: [{ type: 'text', text: render('/home/alice/.claude/projects/-x/memory/') }] }
   const same = checkCallerPlacement(out, caller, { officialCaller: true })
   assert.deepEqual(ids(same), [])
   assert.ok(same.find((p) => p.id === 'caller.skipped').count > 3)
-  out.system[2].text = caller.system[0].text
+  out.system[3].text = caller.system[0].text
   assert.deepEqual(ids(checkCallerPlacement(out, caller, { officialCaller: true })), ['caller.official_system_leak'])
 })
 

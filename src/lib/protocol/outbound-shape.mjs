@@ -6,6 +6,8 @@
 import { createHash } from 'node:crypto'
 import { computeClaudeCodeCch, projectClaudeCodeCchText } from '../identity/cch.mjs'
 import {
+  OFFICIAL_303_GUIDANCE,
+  OFFICIAL_303_HARNESS,
   OFFICIAL_303_IDENTITY,
   OFFICIAL_303_MAIN_PROMPT,
   OFFICIAL_PROFILES,
@@ -162,18 +164,39 @@ export function diffShapes(expected, actual, path = '') {
 }
 
 /**
- * 2.1.303 lean rules a capture must satisfy, beyond the skeleton's top level and system.
- * Messages are checked by rule because turn counts differ from the one-turn skeleton.
+ * Node body handed to cli-node. The boundary stays between harness and guidance
+ * so the CLI can split them. It is not the Anthropic wire.
  */
 export function checkOfficial303Rules(body) {
+  return checkOfficial303Shape(body, { stage: 'node' })
+}
+
+/**
+ * Body after cli-node splitSysPromptPrefix. Four blocks, no boundary literal.
+ * Harness is system[2]; guidance is system[3].
+ */
+export function checkOfficial303WireRules(body) {
+  return checkOfficial303Shape(body, { stage: 'wire' })
+}
+
+function checkOfficial303Shape(body, { stage }) {
   const problems = []
   const shape = outboundShape(body)
   const system = shape.system || []
   const kinds = system.map((block) => block.kind)
-  if (kinds.join(',') !== 'billing,identity,main')
-    problems.push(`system kinds ${kinds.join(',')} != billing,identity,main`)
+  const expected = stage === 'wire' ? 'billing,identity,harness,guidance' : 'billing,identity,harness,boundary,guidance'
+  if (kinds.join(',') !== expected) problems.push(`system kinds ${kinds.join(',')} != ${expected}`)
+  const guidanceAt = stage === 'wire' ? 3 : 4
   if (system[0]?.cache_control) problems.push('billing carries a marker')
-  if (!system[1]?.cache_control || !system[2]?.cache_control) problems.push('identity / main must carry markers')
+  if (system[1]?.cache_control) problems.push('identity carries a marker')
+  if (stage === 'node' && system[3]?.cache_control) problems.push('dynamic boundary carries a marker')
+  if (stage === 'wire' && kinds.includes('boundary')) problems.push('dynamic boundary reached the wire')
+  if (!system[2]?.cache_control || !system[guidanceAt]?.cache_control)
+    problems.push('harness / guidance must carry markers')
+  if (system[2]?.cache_control?.ttl === '1h' && system[2].cache_control.scope !== 'global')
+    problems.push('1h harness marker must carry scope global')
+  if (system[2]?.cache_control?.ttl !== '1h' && system[2]?.cache_control?.scope)
+    problems.push('5m harness marker must not carry scope')
   if (shape.tools?.markers) problems.push('tools carry markers')
   const messages = shape.messages || []
   let lastUser = -1
@@ -222,7 +245,7 @@ export function isAllowedSkeletonDiff(diff) {
   if (at === 'messages' || at.startsWith('messages[')) return true
   if (at === 'top_level') {
     const allowed = new Set(['context_management', 'temperature', 'tool_choice', 'kin_outbound_shape'])
-    const strip = (keys) => (Array.isArray(keys) ? keys.filter((key) => !allowed.has(key)) : keys)
+    const strip = (keys) => (Array.isArray(keys) ? keys.filter((key) => !allowed.has(key)).sort() : keys)
     return JSON.stringify(strip(diff.expected)) === JSON.stringify(strip(diff.actual))
   }
   if (at === 'tools.count') return true
@@ -365,7 +388,12 @@ export function checkCallerPlacement(outBody, inbound, { officialCaller, protoco
       .map((part) => part.trim())) {
       if (para.length < 40) continue
       if (isBillingText(para) || isOfficialIdentityText(para)) continue
-      if (OFFICIAL_303_MAIN_PROMPT.includes(para) || OFFICIAL_303_IDENTITY.includes(para)) {
+      if (
+        OFFICIAL_303_MAIN_PROMPT.includes(para) ||
+        OFFICIAL_303_HARNESS.includes(para) ||
+        OFFICIAL_303_GUIDANCE.includes(para) ||
+        OFFICIAL_303_IDENTITY.includes(para)
+      ) {
         skipped++
         continue
       }

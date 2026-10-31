@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { buildOutboundProfile } from '../../src/lib/admin/outbound-profile.mjs'
 import { validatePersonaRoutingPatch } from '../../src/lib/admin/panel-api.mjs'
-import { personaPreviewVars } from '../../src/lib/identity/crs-persona.mjs'
+import { personaPreviewVars, personaTemplateVars } from '../../src/lib/identity/crs-persona.mjs'
 
 test('outbound reference follows 303 official presets and legacy presets', () => {
   for (const routing of [
@@ -19,8 +19,8 @@ test('outbound reference follows 303 official presets and legacy presets', () =>
   const legacy = buildOutboundProfile({
     compatibility: { persona_preset: 'zero' },
   })
-  assert.equal(legacy.cli_version, '2.1.296')
-  assert.equal(legacy.user_agent, 'claude-cli/2.1.296 (external, sdk-cli)')
+  assert.equal(legacy.cli_version, '2.1.303')
+  assert.match(legacy.user_agent, /^claude-cli\/2\.1\.303 \(external, sdk-cli\)$/)
   assert.match(
     buildOutboundProfile({ compatibility: { persona_preset: 'official_303' } }).anthropic_beta,
     /oauth-2025-04-20/,
@@ -69,5 +69,13 @@ test('preview vars carry the 2.1.303 main prompt and Environment', () => {
   assert.match(vars.agent_official, /^You are an interactive agent that helps users according to your "Output Style"/)
   assert.doesNotMatch(vars.agent_official, /helps users with software engineering tasks/)
   assert.match(vars.main_prompt_303, /^\nYou are an agent working with the user/)
-  assert.match(vars.env_303, /^# Environment\nYou have been invoked in the following environment: /)
+  assert.equal(vars.main_prompt_303.includes('Write code that reads like the surrounding code'), false)
+  const enabled = personaTemplateVars({
+    env: { cwd: '/srv/app', timezone: 'UTC', modelId: 'claude-opus-5-5' },
+    model: 'claude-opus-5-5',
+    withEnv: true,
+    compat: { persona_guidance_presets: { official: true } },
+    preset: 'official',
+  })
+  assert.equal(enabled.main_prompt_303().includes('/srv/app/.claude/projects/-srv-app/memory/'), true)
 })

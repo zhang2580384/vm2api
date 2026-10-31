@@ -102,7 +102,8 @@ export function isCatalogModelId(id) {
   if (s.endsWith('-') || s.endsWith('.')) return false
   if (/\.md$/i.test(s)) return false
   if (/^(gpt-[a-z0-9.-]+|codex-[a-z0-9.-]+)$/i.test(s)) return s.split(/[-.]/).length >= 2
-  if (!/^claude-(opus|sonnet|haiku|fable|3)[a-z0-9.-]*$/i.test(s)) return false
+  if (!/^claude-(opus|sonnet|haiku|fable|3)[a-z0-9.-]*$/i.test(s) && s !== 'auto') return false
+  if (s === 'auto') return true
   return s.split('-').length >= 3
 }
 
@@ -189,6 +190,7 @@ export function resolveCatalogModel(raw, ids = cache.ids) {
   const want1m = hasClaudeCode1mSuffix(popped)
   const bare = stripClaudeCode1mSuffix(popped)
   const lower = bare.toLowerCase()
+  if (lower === 'auto') return { ok: true, model: 'auto' }
   if (FAMILY_ALIASES.has(lower)) {
     const fam = FAMILY_ALIASES.get(lower)
     // Bare `opus` stays on the policy target. Rank would promote claude-opus-5-5;
