@@ -435,7 +435,7 @@ test('GPT on anthropic.messages converts and pins a GPT slot', async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('nested Responses cached_tokens reaches the request log cache column', async () => {
+test('Codex merges SSE cache read/write details with totals without adding reasoning twice', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-cache-'))
   writeGptVm(root, 'vm-gpt-a')
   const res = {
@@ -470,21 +470,52 @@ test('nested Responses cached_tokens reaches the request log cache column', asyn
       writeCodexKernelConfig() {},
       ensureCodexKernel: async () => ({ ok: true }),
       streamCodexKernel: async ({ onEvent }) => {
-        await onEvent('data: {"type":"response.completed"}')
+        await onEvent(
+          'data: {"type":"response.completed","response":{"usage":{"input_tokens_details":{"cached_tokens":8,"cache_creation_tokens":4},"output_tokens_details":{"reasoning_tokens":6}}}}',
+        )
         return {
           ok: true,
           status: 200,
           terminalState: 'verified',
-          // merged trailer + SSE usage: totals flat, cache read nested
-          usage: { input_tokens: 120, output_tokens: 9, input_tokens_details: { cached_tokens: 8 } },
+          // The trailer reports only totals; cache details came from the SSE snapshot.
+          usage: { input_tokens: 120, output_tokens: 9 },
         }
       },
     },
   })
-  assert.equal(logBag.input_tokens, 112)
+  assert.equal(logBag.input_tokens, 108)
   assert.equal(logBag.output_tokens, 9)
   assert.equal(logBag.cache_read_tokens, 8)
+  assert.equal(logBag.cache_creation_tokens, 4)
+  assert.equal(logBag.usage.reasoning_tokens, 6)
   fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('Codex keeps already-disjoint cache counters instead of re-extracting inclusive usage', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-disjoint-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptVm(root, 'vm-gpt-a')
+  const logBag = {}
+  await handleCodexProtocol(
+    codexArgs(
+      root,
+      {
+        ensureCodexKernel: async () => ({ ok: true }),
+        streamCodexKernel: async () => ({
+          ok: true,
+          status: 200,
+          terminalState: 'verified',
+          body: { id: 'resp_disjoint', output: [] },
+          usage: { input_tokens: 108, output_tokens: 9, cache_read_input_tokens: 8, cache_creation_input_tokens: 4 },
+        }),
+      },
+      { logBag },
+    ),
+  )
+  assert.equal(logBag.input_tokens, 108)
+  assert.equal(logBag.output_tokens, 9)
+  assert.equal(logBag.cache_read_tokens, 8)
+  assert.equal(logBag.cache_creation_tokens, 4)
 })
 
 test('request log first_token_ms uses firstTokenAt minus injected ingress t0', async () => {
@@ -637,10 +668,62 @@ test('incomplete Responses stream still bills tokens from the completed event', 
   assert.equal(logBag.input_tokens, 35)
   assert.equal(logBag.output_tokens, 2)
   assert.equal(logBag.cache_read_tokens, 5)
-  assert.equal(logBag.usage.service_tier, 'priority')
+  // Nothing was sent, so the echoed tier does not pick the billing band; it is kept apart.
+  assert.equal(logBag.usage.service_tier, null)
+  assert.equal(logBag.upstream_service_tier, 'priority')
   assert.equal(logBag.error_code, undefined)
   assert.equal(logBag.final_state, 'verified')
   assert.equal(stats.errors, 0)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('#777 fast bills at the sent priority tier and records the upstream default echo', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-tier-'))
+  writeGptVm(root, 'vm-gpt-a')
+  const res = {
+    headersSent: false,
+    write() {
+      this.headersSent = true
+    },
+    end() {
+      this.ended = true
+    },
+  }
+  const logBag = {}
+  const envelopes = []
+  await handleCodexProtocol({
+    req: { headers: {} },
+    res,
+    protocol: 'openai.responses',
+    ctx: { body: { model: 'gpt-6.1-sol', input: 'hi', stream: true, service_tier: 'fast' } },
+    inbound: { stream: true },
+    logBag,
+    stats: { errors: 0, requests: 0, by_route: {} },
+    json: (_res, status, body) => {
+      res.statusCode = status
+      res.body = body
+      return body
+    },
+    writeSSEHeaders() {
+      res.headersSent = true
+    },
+    routing: {},
+    projectRoot: root,
+    ops: {
+      writeCodexKernelConfig() {},
+      ensureCodexKernel: async () => ({ ok: true }),
+      streamCodexKernel: async ({ envelope, onEvent }) => {
+        envelopes.push(envelope)
+        await onEvent(
+          'data: {"type":"response.completed","response":{"service_tier":"DEFAULT","usage":{"input_tokens":10,"output_tokens":2}}}',
+        )
+        return { ok: true, status: 200, terminalState: 'verified' }
+      },
+    },
+  })
+  assert.equal(envelopes[0].body.service_tier, 'priority')
+  assert.equal(logBag.usage.service_tier, 'priority')
+  assert.equal(logBag.upstream_service_tier, 'default')
   fs.rmSync(root, { recursive: true, force: true })
 })
 

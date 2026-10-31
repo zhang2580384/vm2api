@@ -25,6 +25,7 @@ const DEFAULT_EVENTS: NotifyEvents = {
   invalid: true,
   account_down: false,
   account_up: false,
+  vm_down: true,
 }
 
 const EVENT_FIELDS: {
@@ -39,6 +40,11 @@ const EVENT_FIELDS: {
   { key: 'revoked', label: '凭证吊销', desc: '发现新的吊销账号' },
   { key: 'invalid', label: '凭证失效', desc: '发现新的失效凭证' },
   { key: 'account_down', label: '账号离线', desc: '单个账号变为不可用' },
+  {
+    key: 'vm_down',
+    label: 'VM / 节点下线',
+    desc: '节点失联、内核故障或运行中的 VM 停止时，通过已启用的通知通道发送',
+  },
   { key: 'account_up', label: '账号上线', desc: '单个账号恢复可用' },
 ]
 
@@ -222,14 +228,17 @@ export function NotifyPane({
           <CardTitle>通知策略</CardTitle>
         </CardHeader>
         <CardContent className='divide-y'>
-          <SettingRow label='启用通知' desc='按账号池状态与事件规则发送通知'>
+          <SettingRow label='启用通知' desc='按账号池和 VM / 节点状态发送通知'>
             <Switch
               checked={config.enabled}
               aria-label='启用通知'
               onCheckedChange={(enabled) => patch({ enabled })}
             />
           </SettingRow>
-          <SettingRow label='启动即检查' desc='网关重启后立即检查一次账号池'>
+          <SettingRow
+            label='启动即检查'
+            desc='网关重启后立即检查一次账号池和 VM / 节点'
+          >
             <Switch
               checked={config.run_on_start}
               aria-label='启动即检查'
@@ -245,7 +254,10 @@ export function NotifyPane({
               onChange={(interval_sec) => patch({ interval_sec })}
             />
           </SettingRow>
-          <SettingRow label='通知冷却' desc='秒，同类事件的最小发送间隔'>
+          <SettingRow
+            label='通知冷却'
+            desc='秒，账号池同类事件的最小发送间隔；VM 下线按每次状态变化通知'
+          >
             <NumberField
               ariaLabel='通知冷却（秒）'
               value={config.cooldown_sec}

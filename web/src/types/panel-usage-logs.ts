@@ -31,8 +31,10 @@ export type ProviderChainItem = {
   action: string | null
   /** 该次尝试是否已把响应提交给下游（= 最终服务方）。 */
   downstreamCommitted: boolean
-  /** 排队等槽耗时。 */
+  /** 调度总耗时，包含实际排队；历史记录没有拆分。 */
   waitMs: number | null
+  queueWaitMs: number | null
+  schedulingMs: number | null
   ttftMs: number | null
   latencyMs: number | null
   startedAt: string | null
@@ -75,7 +77,7 @@ export type SpecialSetting = {
 /** 缓存写入 TTL 口径，由 5m / 1h 写入量派生。`mixed` = 两者都写了。 */
 export type CacheTtlApplied = '5m' | '1h' | 'mixed' | null
 
-/** 归一后的思考强度。原始字段见后端 `reasoningEffortOf()`。 */
+/** 发往槽位的思考强度。调用方值优先，否则模型缺省。见 `loggedReasoningEffort()`。 */
 export type ReasoningEffort =
   'none' | 'minimal' | 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
@@ -120,11 +122,13 @@ export type UsageLogRow = {
   logMode: 'normal' | 'debug' | null
   inputTokens: number
   outputTokens: number
-  cacheCreationInputTokens: number
+  /** null = 上游未报告写入量，不等于明确写入 0。 */
+  cacheCreationInputTokens: number | null
   cacheReadInputTokens: number
   cacheCreation5mInputTokens: number
   cacheCreation1hInputTokens: number
   cacheTtlApplied: CacheTtlApplied
+  /** 实际总量：cache-exclusive input + output + 读 + 写，不是 input+output。 */
   totalTokens: number
   /** 官方标准价合计（`total_cost`）；null = 未计价。 */
   costUsd: number | null
@@ -133,8 +137,20 @@ export type UsageLogRow = {
   groupCostMultiplier: number | null
   costBreakdown: CostBreakdown | null
   durationMs: number | null
-  /** 首 token 耗时（`first_token_ms`）。 */
+  /**
+   * 首字节 / 首个协议事件（`first_byte_ms`），相对入口。
+   * 历史行或未观测到上游协议事件为 `null`，不用别的时间估。
+   */
+  firstByteMs: number | null
+  /** 首个生成内容/进度（`first_token_ms`），包括 thinking、工具名称和参数。 */
   ttftMs: number | null
+  /**
+   * 上游输出窗口（`generation_ms`）：首个协议事件到终止生成事件
+   *（Claude `message_delta.stop_reason` / Responses `response.completed`）。
+   * 含不可见推理，不含 HTTP/trailer/cleanup。历史行 / 单包窗口为 `null`，
+   * 禁止用总耗时减 TTFT 估。
+   */
+  generationMs: number | null
   stopReason: string | null
   attemptCount: number | null
   finalState: string | null
@@ -142,8 +158,10 @@ export type UsageLogRow = {
   via: string | null
   stream: boolean | null
   hasTools: boolean | null
-  /** OpenAI service tier（原样小写）。 */
+  /** OpenAI service tier 发出值（原样小写），计费按此档。 */
   serviceTier: string | null
+  /** 上游 `response.service_tier` 回显；与 serviceTier 不同即档位被上游改写。 */
+  upstreamServiceTier: string | null
   /** Anthropic speed：`fast` | `standard`。 */
   speed: string | null
   /** 长上下文（1M）计价档是否生效；null = 未计价。 */
@@ -155,6 +173,9 @@ export type UsageLogRow = {
   errorOwner: 'client' | 'provider' | 'platform' | null
   errorCode: string | null
   errorMessage: string | null
+  /** classifyJev 实际 POST 的 state。送审上下文，不是模型指出的命中句。 */
+  jevState: string | null
+
   /** 平台侧拦截（distill / refusal / guard …），由 errorClass/finalState 映射。 */
   blockedBy: string | null
   blockedReason: string | null

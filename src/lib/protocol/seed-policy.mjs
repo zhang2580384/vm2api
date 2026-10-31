@@ -4,10 +4,10 @@
  *
  * Telemetry has one read: `telemetry_disabled === false` means on
  * (`isTelemetryEnabled`). Everything else is a mirror of that bit.
- *   on  → delete kill-switch keys; sidecar on
+ *   on  → delete managed kill-switch keys; native 1P policy on
  *         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
  *         do_not_track = false
- *   off → kill-switch keys = "1"; sidecar off
+ *   off → kill-switch keys = "1"; native collection/sending off and queue cleared
  *         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "0"
  *         do_not_track = true (DO_NOT_TRACK=1)
  * grove_enabled is always false (Help improve Claude off).
@@ -67,9 +67,6 @@ export const LEGACY_SCRIPT_ENV_KEYS = Object.freeze([
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_UNIX_SOCKET',
 ])
-
-/** @deprecated use TELEMETRY_KILL_ENV; kept for panel payloads when telemetry is off */
-export const REQUIRED_SEED_ENV = TELEMETRY_KILL_ENV
 
 export function stripLegacyScriptEnv(env = {}) {
   const next = { ...(env && typeof env === 'object' ? env : {}) }

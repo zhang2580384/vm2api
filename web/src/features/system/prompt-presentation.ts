@@ -9,7 +9,10 @@ const VARIABLES: Record<string, string> = {
 
 const LABELS: Record<string, [string, string]> = {
   billing: ['计费归因', '保留请求所需的计费标识'],
-  identity: ['身份', '官方客户端身份'],
+  identity: [
+    '身份',
+    "You are Claude Code, Anthropic's official CLI for Claude.",
+  ],
   harness: ['核心提示词', '工作方式、工具使用与执行规则'],
   guidance: ['行为指引', '交互规范与记忆指引'],
   dynamic_boundary: ['动态边界', '仅供 cli-hop 拆分，不出站'],

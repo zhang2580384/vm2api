@@ -171,38 +171,3 @@ test('migration disconnects the legacy container before pinning the same network
   assert.equal(occupancy.get(net)?.containerId, 'new-1')
   assert.equal(occupancy.get(net)?.ip, ip)
 })
-
-test('remote service refresh forwards the migrated binary digest to egress', async () => {
-  const source = fs.readFileSync(new URL('../../src/lib/cluster/remote-slot.mjs', import.meta.url), 'utf8')
-  const body = source.slice(
-    source.indexOf('export async function restartRemoteServices('),
-    source.indexOf('export async function stopRemoteSlot('),
-  )
-  const vm = { id: 'kin-05', node_id: 'node-a', runtime: { container: 'kin-05' } }
-  let receivedDigest
-  const restart = vmContext.runInNewContext(`${body.replace('export ', '')}; restartRemoteServices`, {
-    vmNodeId: () => vm.node_id,
-    nodeSession: async () => ({ host: {}, docker: {} }),
-    remoteSlotDir: () => '/slots/kin-05',
-    path,
-    inspectContainerOrNull: async () => ({ State: { Running: true } }),
-    logTelemetryContainerSkip: () => {},
-    telemetryContainerSkip: () => ({ ok: true, skipped: true }),
-    migrateRemoteServiceContainers: async () => ({ ok: true, migrated: [], binary_digest: 'new-binary-digest' }),
-    pushSlotFiles: async () => {},
-    runtimeKind: () => 'docker',
-    slotExecCmd: () => ({ Cmd: ['true'], User: '1000:1000' }),
-    execDetached: async () => {},
-    setTimeout: (done) => done(),
-    slotImageSpec: () => ({ ref: 'slot-image' }),
-    ensureRemoteEgress: async (_session, _vm, { binaryDigest }) => {
-      receivedDigest = binaryDigest
-      return { ok: true }
-    },
-    failure: (error) => ({ ok: false, error: error.message }),
-  })
-  const result = await restart(vm, '/project', { telemetryEnabled: false })
-  assert.equal(result.ok, true, result.error)
-  assert.equal(result.binary_digest, 'new-binary-digest')
-  assert.equal(receivedDigest, 'new-binary-digest')
-})

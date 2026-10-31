@@ -24,80 +24,32 @@ const (
 )
 
 type Config struct {
-	VMID              string          `json:"vm_id"`
-	SocketPath        string          `json:"socket_path"`
-	CredentialPath    string          `json:"credential_path"`
-	ProxyURL          string          `json:"proxy_url"`
-	ProxyRequired     bool            `json:"proxy_required"`
-	EgressMode        string          `json:"egress_mode"`
-	AnthropicBaseURL  string          `json:"anthropic_base_url"`
-	OAuthTokenURL     string          `json:"oauth_token_url"`
-	InternalToken     string          `json:"internal_token"`
-	RefreshSkew       time.Duration   `json:"-"`
-	RefreshSkewSecs   int             `json:"refresh_skew_seconds"`
-	RequestTimeout    time.Duration   `json:"-"`
-	RequestTimeoutSec int             `json:"request_timeout_seconds"`
-	FirstByteTimeout  time.Duration   `json:"-"`
-	FirstByteSecs     int             `json:"first_byte_timeout_seconds"`
-	IdleTimeout       time.Duration   `json:"-"`
-	IdleTimeoutSecs   int             `json:"idle_timeout_seconds"`
-	MaxRequestBytes   int64           `json:"max_request_bytes"`
-	MaxResponseBytes  int64           `json:"max_response_bytes"`
-	MaxEventBytes     int             `json:"max_event_bytes"`
-	DeliveryMode      string          `json:"delivery_mode"`
-	TestEndpoints     bool            `json:"test_endpoints"`
-	RuntimeKind       string          `json:"runtime_kind"`
-	Telemetry         TelemetryConfig `json:"telemetry"`
-	ConfigPath        string          `json:"-"`
-}
-
-type TelemetryConfig struct {
-	Enabled  bool              `json:"enabled"`
-	Identity TelemetryIdentity `json:"identity"`
-	Headers  map[string]string `json:"headers"`
-	// Betas is kept so older worker.json still decodes. Events do not send it.
-	Betas              string `json:"betas"`
-	UploadIntervalSecs int    `json:"upload_interval_seconds"`
-}
-
-type TelemetryIdentity struct {
-	DeviceID           string           `json:"device_id"`
-	UserID             string           `json:"user_id"`
-	AccountUUID        string           `json:"account_uuid"`
-	OrgUUID            string           `json:"org_uuid"`
-	Email              string           `json:"email"`
-	SessionID          string           `json:"session_id"`
-	SubscriptionType   string           `json:"subscription_type"`
-	Platform           string           `json:"platform"`
-	PlatformRaw        string           `json:"platform_raw"`
-	Arch               string           `json:"arch"`
-	NodeVersion        string           `json:"node_version"`
-	Locale             string           `json:"locale"`
-	Timezone           string           `json:"timezone"`
-	CLIVersion         string           `json:"cli_version"`
-	Entrypoint         string           `json:"entrypoint"`
-	Terminal           string           `json:"terminal"`
-	Shell              string           `json:"shell"`
-	PackageManagers    string           `json:"package_managers"`
-	VCS                string           `json:"vcs"`
-	Runtimes           string           `json:"runtimes"`
-	BuildTime          string           `json:"build_time"`
-	LinuxDistroID      string           `json:"linux_distro_id"`
-	LinuxDistroVersion string           `json:"linux_distro_version"`
-	LinuxKernel        string           `json:"linux_kernel"`
-	Process            TelemetryProcess `json:"process"`
-	Source             string           `json:"source"`
-	Env                map[string]any   `json:"env"`
-	Betas              string           `json:"betas"`
-}
-
-type TelemetryProcess struct {
-	ConstrainedMemory int64   `json:"constrained_memory"`
-	RSSRange          []int64 `json:"rss_range"`
-	HeapTotalRange    []int64 `json:"heap_total_range"`
-	HeapUsedRange     []int64 `json:"heap_used_range"`
-	ExternalRange     []int64 `json:"external_range"`
-	ArrayBuffersRange []int64 `json:"array_buffers_range"`
+	VMID              string        `json:"vm_id"`
+	SocketPath        string        `json:"socket_path"`
+	CredentialPath    string        `json:"credential_path"`
+	ProxyURL          string        `json:"proxy_url"`
+	ProxyRequired     bool          `json:"proxy_required"`
+	EgressMode        string        `json:"egress_mode"`
+	AnthropicBaseURL  string        `json:"anthropic_base_url"`
+	OAuthTokenURL     string        `json:"oauth_token_url"`
+	InternalToken     string        `json:"internal_token"`
+	RefreshSkew       time.Duration `json:"-"`
+	RefreshSkewSecs   int           `json:"refresh_skew_seconds"`
+	RequestTimeout    time.Duration `json:"-"`
+	RequestTimeoutSec int           `json:"request_timeout_seconds"`
+	FirstByteTimeout  time.Duration `json:"-"`
+	FirstByteSecs     int           `json:"first_byte_timeout_seconds"`
+	IdleTimeout       time.Duration `json:"-"`
+	IdleTimeoutSecs   int           `json:"idle_timeout_seconds"`
+	MaxRequestBytes   int64         `json:"max_request_bytes"`
+	MaxResponseBytes  int64         `json:"max_response_bytes"`
+	MaxEventBytes     int           `json:"max_event_bytes"`
+	DeliveryMode      string        `json:"delivery_mode"`
+	TestEndpoints     bool          `json:"test_endpoints"`
+	RuntimeKind       string        `json:"runtime_kind"`
+	OAuthUserAgent    string        `json:"oauth_user_agent"`
+	CLIVersion        string        `json:"cli_version"`
+	ConfigPath        string        `json:"-"`
 }
 
 func Load(path string) (Config, error) {
@@ -118,26 +70,6 @@ func Load(path string) (Config, error) {
 	}
 	cfg.ConfigPath = path
 	return cfg, nil
-}
-
-// LoadTelemetry reads only worker.json's telemetry block.
-// Proxy and endpoint validation stay out of this path so a hot reload can
-// apply identity, headers, env, and betas without bouncing the process.
-func LoadTelemetry(path string) (TelemetryConfig, error) {
-	if strings.TrimSpace(path) == "" {
-		return TelemetryConfig{}, errors.New("worker config path is required")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return TelemetryConfig{}, fmt.Errorf("read worker config: %w", err)
-	}
-	var wrap struct {
-		Telemetry TelemetryConfig `json:"telemetry"`
-	}
-	if err = json.Unmarshal(data, &wrap); err != nil {
-		return TelemetryConfig{}, fmt.Errorf("decode worker config: %w", err)
-	}
-	return wrap.Telemetry, nil
 }
 
 func (c *Config) applyDefaults() {
@@ -172,7 +104,7 @@ func (c *Config) applyDefaults() {
 		c.MaxResponseBytes = 64 << 20
 	}
 	if c.MaxEventBytes <= 0 {
-		c.MaxEventBytes = 32 << 20
+		c.MaxEventBytes = 64 << 20
 	}
 	if c.DeliveryMode == "" {
 		c.DeliveryMode = "realtime"

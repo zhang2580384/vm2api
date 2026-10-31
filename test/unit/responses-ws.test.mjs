@@ -8,6 +8,7 @@ import { once } from 'node:events'
 import { WebSocket } from 'ws'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
+import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 import {
   createResponsesWsHandler,
@@ -801,6 +802,7 @@ test('real handleProtocol: one in-flight interrupt yields a single cancelled fin
       },
     },
     apiKeyStore: {
+      acquire: () => ({ ok: true }),
       recordUsage(_key, usage) {
         usageRecords.push(usage)
       },
@@ -857,6 +859,7 @@ test('real handleProtocol: interrupt after hop finish bills once without duplica
       },
     },
     apiKeyStore: {
+      acquire: () => ({ ok: true }),
       recordUsage(_key, usageRow) {
         usageRecords.push(usageRow)
       },
@@ -896,9 +899,75 @@ test('real handleProtocol: interrupt after hop finish bills once without duplica
     assert.equal(finishCalls[0].error_code, null)
     assert.equal(finishCalls[0].input_tokens, 12)
     assert.equal(finishCalls[0].output_tokens, 4)
-    assert.equal(usageRecords.length, 0)
+    assert.equal(usageRecords.length, 1)
+    assert.equal(usageRecords[0].input_tokens, 12)
+    assert.equal(usageRecords[0].output_tokens, 4)
     opened.ws.close()
   } finally {
+    await live.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('real handleProtocol: Codex spend fills the managed key USD quota and the next request is refused', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-responses-ws-key-quota-'))
+  writeGptVm(root, 'vm-gpt-a')
+  const keys = new ApiKeyStore({ dataDir: fs.mkdtempSync(path.join(root, 'keys-')) })
+  const key = keys.create({ name: 'gpt', quota: 0.000001 })
+  const finishCalls = []
+  let hops = 0
+  const usage = { input_tokens: 100_000, output_tokens: 10_000, total_tokens: 110_000 }
+  const live = await listenWithHandleProtocol(root, {
+    requireAuth(req) {
+      req.apiKeyKind = 'managed'
+      req.apiKeyRecord = keys.getById(key.id)
+      req.presentedApiKey = 'sk-test'
+      return true
+    },
+    requestLog: {
+      start: () => ({ request_id: `ws-key-quota-${finishCalls.length}`, t0: Date.now() }),
+      finish(_ctx, bag) {
+        finishCalls.push(bag)
+      },
+    },
+    apiKeyStore: keys,
+    codexOps: {
+      streamCodexKernel: async ({ onEvent }) => {
+        hops += 1
+        await onEvent(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: { id: `resp_quota_${hops}`, status: 'completed', output: [], usage },
+          })}\n\n`,
+        )
+        return { ok: true, status: 200, terminalState: 'verified', usage }
+      },
+    },
+  })
+  const waitFinish = async (n) => {
+    const deadline = Date.now() + 5000
+    while (finishCalls.length < n) {
+      assert.ok(Date.now() < deadline, 'requestLog.finish timeout')
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+  let opened = null
+  try {
+    opened = await openWs(live.url, { authorization: 'Bearer sk-test' })
+    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.4', input: 'first' }))
+    await waitFinish(1)
+    const spent = keys.getById(key.id)
+    assert.equal(spent.requests, 1)
+    assert.equal(spent.tokens_in, 100_000)
+    assert.equal(spent.tokens_out, 10_000)
+    assert.ok(spent.quota_used > 0)
+    assert.equal(spent.status, 'quota_exhausted')
+    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.4', input: 'second' }))
+    await waitFinish(2)
+    assert.equal(finishCalls[1].error_code, 'api_key_quota_exhausted')
+    assert.equal(hops, 1)
+  } finally {
+    opened?.ws?.close()
     await live.close()
     fs.rmSync(root, { recursive: true, force: true })
   }

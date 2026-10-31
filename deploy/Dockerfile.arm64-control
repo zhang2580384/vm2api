@@ -1,6 +1,6 @@
 # ARM64 control plane with the linux amd64 slot payloads pinned in deploy/payload.json.
 # Runtime dependencies are pinned independently of the checkout VERSION.
-ARG NODE_IMAGE=node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+ARG NODE_IMAGE=node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
 # The prebuilt Rust payloads require GLIBC_2.39 (Ubuntu 24.04).
 ARG AMD64_RUNTIME_IMAGE=ubuntu:24.04@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b
 FROM --platform=linux/amd64 ${AMD64_RUNTIME_IMAGE} AS amd64-runtime
@@ -35,6 +35,16 @@ COPY deploy/payload.json deploy/payload.json
 COPY scripts/fetch-payload.mjs scripts/fetch-payload.mjs
 RUN node scripts/fetch-payload.mjs --dest /payload
 
+# Native CLI only for local ARM slots; the portable x86 payload stays untouched.
+FROM --platform=linux/arm64 ${NODE_IMAGE} AS native-cli
+RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY deploy/build-native-cli.py deploy/arm64-cli.json ./
+COPY --from=payload /payload/share/wrap-cli/cli-node /input/cli-node
+RUN python3 build-native-cli.py --payload /input/cli-node --output /native-cli \
+    --manifest arm64-cli.json --cache /tmp/native-cli-tools
+
 FROM --platform=linux/arm64 docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c AS dockercli
 FROM --platform=linux/arm64 ${NODE_IMAGE}
 RUN apt-get update \
@@ -54,6 +64,7 @@ COPY --from=helpers /out/amd64/ /opt/vm2api/cluster-bin-amd64/
 COPY share/wrap-cli /opt/vm2api/image-wrap-cli/
 COPY --from=payload /payload/share/wrap-cli/ /opt/vm2api/image-wrap-cli/
 COPY --from=payload /payload/share/crag/ /opt/vm2api/image-crag/
+COPY --from=native-cli /native-cli/ /opt/vm2api/image-native-cli/
 # Only the remaining x86 executables need these libraries and loader under QEMU.
 COPY --from=amd64-runtime /usr/lib/x86_64-linux-gnu/ /usr/lib/x86_64-linux-gnu/
 COPY --from=amd64-runtime /usr/lib64/ /usr/lib64/
@@ -81,6 +92,7 @@ ENV NODE_ENV=production \
     KIN_CLUSTER_WORKER_BIN=/opt/vm2api/cluster-bin-amd64/kin-worker \
     KIN_CLUSTER_EGRESS_BIN=/opt/vm2api/cluster-bin-amd64/kin-egress \
     KIN_CLUSTER_GATE_BIN=/opt/vm2api/cluster-bin-amd64/kin-slot-gate \
+    KIN_NATIVE_CLI_ROOT=/opt/vm2api/image-native-cli \
     DOCKER_DEFAULT_PLATFORM=linux/amd64
 EXPOSE 8787
 ENTRYPOINT ["/usr/local/bin/vm2api-entrypoint"]

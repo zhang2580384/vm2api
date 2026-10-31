@@ -47,6 +47,7 @@ import {
   DEFAULT_CACHE_TTL,
   enforceCacheTtlOrder,
   normalizeCacheTtl,
+  listCacheMarkers,
   removeCacheControlFields,
   stripIllegalCacheControlFields,
   validateCacheBreakpoints,
@@ -55,6 +56,7 @@ import { apiKeyBetaHeader, setupTokenBetaHeader } from './claude-code-betas.mjs'
 
 import { isApiKeyMode, isAnySetupTokenMode } from '../oauth/credential-mode.mjs'
 import { prepareClassifierBody } from './request-purpose.mjs'
+import { applyEagerToolStreaming } from './eager-tool-streaming.mjs'
 
 export const INFERENCE_UA = 'kin-inference/1.0'
 
@@ -187,13 +189,13 @@ export function officialSystemTemplate(system, ttl = DEFAULT_CACHE_TTL) {
 }
 
 /**
- * Two markers, stamped with the session TTL: the last text of the current tail
+ * Up to two markers, within the supplied budget and TTL: the last text of the current tail
  * and of the user turn before it (4+ messages). The second one sits on the
  * previous request's write, so a turn that grows past the 20-block lookback
  * still reads it instead of falling back to the system prefix.
  */
-function officialMessageMarker(messages, ttl = DEFAULT_CACHE_TTL) {
-  if (!Array.isArray(messages) || messages.length === 0) return messages
+function officialMessageMarker(messages, ttl = DEFAULT_CACHE_TTL, limit = 2) {
+  if (!Array.isArray(messages) || messages.length === 0 || limit <= 0) return messages
   const next = messages.map((message) => {
     if (!message || typeof message !== 'object') return message
     if (typeof message.content === 'string') {
@@ -221,7 +223,7 @@ function officialMessageMarker(messages, ttl = DEFAULT_CACHE_TTL) {
   }
   if (users.length === 0) return next
   stampMessageTail(next, users[0], ttl)
-  if (users.length > 1 && next.length >= 4) stampMessageTail(next, users[1], ttl)
+  if (limit > 1 && users.length > 1 && next.length >= 4) stampMessageTail(next, users[1], ttl)
   return next
 }
 
@@ -244,28 +246,55 @@ function stampMessageTail(messages, index, ttl) {
     return
   }
 }
-/** Official Claude Code omits eager streaming and tool cache markers. A caller TTL here makes CLI fill the omitted system and message markers. */
-function stripEagerInputStreaming(tools) {
+/** Tool-cache cleanup must not remove caller or panel-controlled eager streaming. */
+function stripToolCacheControl(tools, { preserveCacheControl = false } = {}) {
   if (!Array.isArray(tools)) return tools
   let changed = false
   const next = tools.map((tool) => {
     if (!tool || typeof tool !== 'object') return tool
-    const hasOwn = Object.prototype.hasOwnProperty.call(tool, 'eager_input_streaming')
-    const hasCache = Object.prototype.hasOwnProperty.call(tool, 'cache_control')
-    const fn = tool.function
-    const fnHas = fn && typeof fn === 'object' && Object.prototype.hasOwnProperty.call(fn, 'eager_input_streaming')
-    if (!hasOwn && !hasCache && !fnHas) return tool
+    const hasCache = !preserveCacheControl && Object.prototype.hasOwnProperty.call(tool, 'cache_control')
+    if (!hasCache) return tool
     changed = true
     const copy = { ...tool }
-    delete copy.eager_input_streaming
     delete copy.cache_control
-    if (fnHas) {
-      copy.function = { ...fn }
-      delete copy.function.eager_input_streaming
-    }
     return copy
   })
   return changed ? next : tools
+}
+
+/** Clean official CLI-owned controls before rendering and budgeting template markers. */
+export function prepareCliPersonaInput(body, preset) {
+  if (preset === 'zero') return body
+  const { cache_control: _automatic, ...out } = body
+  if (Array.isArray(out.tools)) out.tools = stripToolCacheControl(out.tools)
+  return out
+}
+
+/** CLI needs a block marker: project automatic caching onto the current message tail. */
+function materializeAutomaticCache(body) {
+  validateCacheBreakpoints(body)
+  const { cache_control: control, ...out } = body
+  const messages = Array.isArray(body.messages) ? body.messages : []
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (!message || typeof message !== 'object') continue
+    // Supported mid-conversation system turns are also in the cache prefix.
+    // Skipping them could put this 5m marker before their explicit 1h marker.
+    const content = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content
+    if (!Array.isArray(content)) continue
+    for (let j = content.length - 1; j >= 0; j--) {
+      const block = content[j]
+      if (!block || ['thinking', 'redacted_thinking'].includes(block.type)) continue
+      // An explicit tail policy already caches the entire eligible prefix.
+      if (block.cache_control != null) return out
+      const next = content.slice()
+      next[j] = { ...block, cache_control: { ...control } }
+      out.messages = messages.slice()
+      out.messages[i] = { ...message, content: next }
+      return out
+    }
+  }
+  return out
 }
 
 /**
@@ -293,6 +322,7 @@ export function prepareCliHopBody(
     autoCompactWindow = null,
     routing = null,
     outboundShape = null,
+    personaPreset = null,
   } = {},
 ) {
   if (requestContext?.purpose === 'auto_mode_classifier') return prepareClassifierBody(canonicalBody, { stream })
@@ -305,19 +335,25 @@ export function prepareCliHopBody(
     body.auto_compact_window = windowTokens
   }
   delete body.metadata
-  // Official family keeps the inbound system and its markers. Rewriting them
-  // into the persona template (billing / reporting / 1h) is what diverges from
-  // the captured Claude Code body: two ephemeral blocks, TTL omitted.
-  const assembledTemplate = (system) => {
-    const blocks = Array.isArray(system) ? system : []
-    const texts = blocks.map(textOf)
-    return (
-      texts.some((text) => text.trim() === '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__') ||
-      texts.some((text) => /^x-anthropic-billing-header/i.test(text) && /prompt_version=</.test(text))
-    )
-  }
+  // Rendered presets may disable or edit billing and the dynamic boundary.
+  // The handler passes its resolved preset only after rendering; text detection
+  // is a compatibility fallback for callers without that assembly state.
+  const preparedZero =
+    personaPreset === 'zero' ||
+    (personaPreset == null &&
+      Array.isArray(body.system) &&
+      body.system.some(
+        (block) => /^x-anthropic-billing-header/i.test(textOf(block)) && /prompt_version=</.test(textOf(block)),
+      ))
+  // Zero may forward a caller's boundary literal; it must keep zero's fallback
+  // policy rather than trigger the official template/tool-marker policy.
+  const shaped =
+    !preparedZero &&
+    (personaPreset != null ||
+      (Array.isArray(body.system) &&
+        body.system.some((block) => textOf(block).trim() === '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')))
   if (!preserveSystem) {
-    if (!lean && !assembledTemplate(body.system)) {
+    if (!lean && !shaped && !preparedZero) {
       const leftover = stripCliOwnedSystem(body.system, { preserveCallerEnvironment })
       if (leftover == null) delete body.system
       else body.system = leftover
@@ -336,23 +372,49 @@ export function prepareCliHopBody(
   body = stripInvalidThinkingBlocks(body, { preserveThinkingBlocks })
   body = ensureOutputConfigSchema(body)
 
-  if (Object.prototype.hasOwnProperty.call(body, 'cache_control')) delete body.cache_control
+  if (preparedZero && !lean && !preserveSystem && !requestContext && body.cache_control != null) {
+    body = materializeAutomaticCache(body)
+  } else if (Object.prototype.hasOwnProperty.call(body, 'cache_control')) {
+    delete body.cache_control
+  }
   if (!requestContext) {
-    const preparedZero =
-      Array.isArray(body.system) &&
-      body.system.some(
-        (block) => /^x-anthropic-billing-header/i.test(textOf(block)) && /prompt_version=</.test(textOf(block)),
-      )
-    const shaped =
-      Array.isArray(body.system) &&
-      body.system.some((block) => textOf(block).trim() === '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
     if (!lean && !shaped && !preparedZero) {
       body = { ...body, system: officialSystemTemplate(body.system, cacheTtl) }
       body.messages = officialMessageMarker(body.messages, cacheTtl)
     }
-    if (Array.isArray(body.tools)) body = { ...body, tools: stripEagerInputStreaming(body.tools) }
+    // Zero owns its system layout, but does not assemble message breakpoints.
+    // Only supply a fallback when the caller has no explicit cache policy:
+    // preserving existing markers also preserves their budget and TTL order.
+    const zeroFallback = preparedZero && !lean && !shaped && !preserveSystem
+    if (zeroFallback) {
+      const hasMarker = (node) => node?.cache_control != null
+      const hasCallerMarkers =
+        (Array.isArray(body.system) && body.system.some(hasMarker)) ||
+        (Array.isArray(body.tools) && body.tools.some(hasMarker)) ||
+        (Array.isArray(body.messages) &&
+          body.messages.some((message) => Array.isArray(message?.content) && message.content.some(hasMarker)))
+      if (!hasCallerMarkers) body.messages = officialMessageMarker(body.messages, cacheTtl)
+    }
+    // Keep official tool-marker cleanup before counting available slots. A
+    // caller's 5m tool marker must not precede a template-owned 1h system marker.
+    if (Array.isArray(body.tools)) {
+      body = { ...body, tools: stripToolCacheControl(body.tools, { preserveCacheControl: zeroFallback }) }
+    }
+    // Assembled official templates own their system markers, not the growing
+    // conversation. Fill missing message anchors without moving caller markers.
+    const shapedFallback = shaped && !lean && !preserveSystem
+    if (shapedFallback) {
+      const markers = listCacheMarkers(body)
+      if (!markers.some((marker) => marker.section === 'messages')) {
+        const available = Math.max(0, 4 - markers.length)
+        // A missing TTL means 5m. A later 1h marker would be rejected; keep
+        // existing prefix TTLs intact and only shorten our new message markers.
+        const ttl = markers.some((marker) => marker.ttl !== '1h') ? '5m' : cacheTtl
+        body.messages = officialMessageMarker(body.messages, ttl, Math.min(2, available))
+      }
+    }
   }
-  return body
+  return applyEagerToolStreaming(body, routing)
 }
 
 export function prepareOutboundAttempt({

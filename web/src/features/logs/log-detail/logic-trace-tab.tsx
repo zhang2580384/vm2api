@@ -70,8 +70,20 @@ function AttemptDetails({ item }: { item: ProviderChainItem }) {
         value={item.downstreamCommitted ? '是' : '否'}
       />
       <Field
-        label='排队等待'
+        label='调度总耗时'
         value={item.waitMs != null ? formatDuration(item.waitMs) : null}
+      />
+      <Field
+        label='调度处理'
+        value={
+          item.schedulingMs != null ? formatDuration(item.schedulingMs) : null
+        }
+      />
+      <Field
+        label='排队等待'
+        value={
+          item.queueWaitMs != null ? formatDuration(item.queueWaitMs) : null
+        }
       />
       <Field
         label='首 Token'

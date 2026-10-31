@@ -11,6 +11,7 @@
  */
 
 import { getDb } from '../database.mjs'
+import { rowToAccount } from './accounts-repo.mjs'
 
 function parse(value, fallback = null) {
   if (value == null) return fallback
@@ -63,20 +64,33 @@ function mergeState(rt, acc) {
 export class AccountRuntimeRepo {
   constructor(db = getDb()) {
     this.db = db
-    this._getRt = db.prepare('SELECT * FROM account_runtime WHERE account_id = ?')
-    this._getAcc = db.prepare(`
-      SELECT id, vm_id, priority, load_factor, last_used_at,
-             temp_unschedulable_until, temp_unschedulable_reason,
-             rate_limited_at, rate_limit_reset_at, overload_until,
-             session_window_start, session_window_end, session_window_status,
-             updated_at
-      FROM accounts WHERE id = ?
-    `)
-    this._listIds = db.prepare(`
-      SELECT account_id FROM account_runtime
-      UNION SELECT id FROM accounts
-      ORDER BY 1
-    `)
+    const snapshot = `SELECT a.id, a.vm_id, a.email, a.name, a.platform, a.type,
+      a.status, a.schedulable, a.priority, a.rate_multiplier, a.concurrency,
+      a.concurrency_override, a.max_rpm, a.rpm_override, a.requests,
+      a.tokens_in, a.tokens_out, a.cache_read_tokens, a.cache_creation_tokens,
+      a.extra, a.updated_at, a.load_factor, a.last_used_at,
+      a.temp_unschedulable_until, a.temp_unschedulable_reason, a.rate_limited_at,
+      a.rate_limit_reset_at, a.overload_until, a.session_window_start,
+      a.session_window_end, a.session_window_status,
+      r.account_id AS rt_account_id, r.vm_id AS rt_vm_id, r.status AS rt_status,
+      r.updated_at AS rt_updated_at, r.model_states_json, r.credential_generation,
+      r.refresh_status, r.worker_heartbeat_at, r.worker_status_json
+      FROM accounts a FULL JOIN account_runtime r ON r.account_id = a.id`
+    this._snapshots = db.prepare(snapshot + ' WHERE COALESCE(a.id, r.account_id) IN (SELECT value FROM json_each(?))')
+    this._allSnapshots = db.prepare(snapshot)
+    this._heartbeat = db.prepare(`INSERT INTO account_runtime
+      (account_id, vm_id, status, worker_heartbeat_at, worker_status_json,
+       credential_generation, refresh_status, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(account_id) DO UPDATE SET
+        status = CASE WHEN account_runtime.status IN ('disabled','cooldown','rate_limited')
+          THEN account_runtime.status ELSE excluded.status END,
+        worker_heartbeat_at = excluded.worker_heartbeat_at,
+        worker_status_json = excluded.worker_status_json,
+        credential_generation = MAX(account_runtime.credential_generation, excluded.credential_generation),
+        refresh_status = excluded.refresh_status,
+        updated_at = excluded.updated_at
+      WHERE COALESCE(account_runtime.worker_heartbeat_at, 0) <= excluded.worker_heartbeat_at`)
     this._ensureAcc = db.prepare(`
       INSERT OR IGNORE INTO accounts (id, vm_id, name, extra, created_at, updated_at)
       VALUES (?, ?, ?, '{}', ?, ?)
@@ -104,27 +118,58 @@ export class AccountRuntimeRepo {
         vm_id = excluded.vm_id,
         status = excluded.status,
         model_states_json = excluded.model_states_json,
-        credential_generation = excluded.credential_generation,
-        refresh_status = excluded.refresh_status,
-        worker_heartbeat_at = excluded.worker_heartbeat_at,
-        worker_status_json = excluded.worker_status_json,
+        credential_generation = MAX(account_runtime.credential_generation, excluded.credential_generation),
+        refresh_status = CASE WHEN COALESCE(excluded.worker_heartbeat_at, 0) >= COALESCE(account_runtime.worker_heartbeat_at, 0) THEN excluded.refresh_status ELSE account_runtime.refresh_status END,
+        worker_heartbeat_at = MAX(COALESCE(account_runtime.worker_heartbeat_at, 0), COALESCE(excluded.worker_heartbeat_at, 0)),
+        worker_status_json = CASE WHEN COALESCE(excluded.worker_heartbeat_at, 0) >= COALESCE(account_runtime.worker_heartbeat_at, 0) THEN excluded.worker_status_json ELSE account_runtime.worker_status_json END,
         updated_at = excluded.updated_at
     `)
     this._removeRt = db.prepare('DELETE FROM account_runtime WHERE account_id = ?')
   }
 
+  schedulingSnapshot(accountIds) {
+    if (!accountIds.length) return new Map()
+    return new Map(
+      this._snapshots
+        .all(JSON.stringify(accountIds))
+        .map((row) => [row.id ?? row.rt_account_id, this.snapshotRow(row)]),
+    )
+  }
+
+  snapshotRow(row) {
+    const account = row.id == null ? null : row
+    const runtime =
+      row.rt_account_id == null
+        ? null
+        : {
+            ...row,
+            account_id: row.rt_account_id,
+            vm_id: row.rt_vm_id,
+            status: row.rt_status,
+            updated_at: row.rt_updated_at,
+          }
+    return { account: rowToAccount(account), state: mergeState(runtime, account) }
+  }
+
   get(accountId) {
-    const rt = this._getRt.get(accountId)
-    const acc = this._getAcc.get(accountId)
-    if (!rt && !acc) return null
-    return mergeState(rt, acc)
+    return this.schedulingSnapshot([accountId]).get(accountId)?.state || null
   }
 
   list() {
-    return this._listIds
-      .all()
-      .map((r) => this.get(r.account_id ?? r.id))
-      .filter(Boolean)
+    return this._allSnapshots.all().map((row) => this.snapshotRow(row).state)
+  }
+
+  writeHeartbeat(input) {
+    this._heartbeat.run(
+      input.account_id,
+      input.vm_id,
+      input.status,
+      input.worker_heartbeat_at,
+      JSON.stringify(input.worker_status),
+      input.credential_generation,
+      input.refresh_status,
+      new Date().toISOString(),
+    )
   }
 
   upsert(input = {}) {

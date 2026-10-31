@@ -1,37 +1,46 @@
-/** One line of `run/telemetry-upload.log`, written by the kin-worker sidecar. */
+import { z } from 'zod'
+
+/** Safe per-VM native upload counts/status, without payloads or credentials. */
 export type UploadEntry = {
   at: number
-  kind: 'batch' | 'eval' | 'other'
-  name: string
+  events: number
   ok: boolean
-  state: string
+  error: string | null
   raw: string
 }
 
 export type UploadSummary = {
   entries: UploadEntry[]
   batch: number
-  evals: number
+  events: number
   failed: number
   first: number | null
   last: number | null
 }
 
-const LINE_RE = /^(\S+) (\S+) (\S+) (\S+)(?: |$)/
+const auditSchema = z.object({
+  at: z.iso.datetime(),
+  ok: z.boolean(),
+  events: z.number().int().min(0).max(1000),
+  error: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{0,63}$/)
+    .nullable(),
+})
 
 export function parseUploadLine(raw: string): UploadEntry | null {
-  const match = LINE_RE.exec(raw)
-  if (!match) return null
-  const at = Date.parse(match[1])
-  if (!Number.isFinite(at)) return null
-  const kind = match[2] === 'batch' || match[2] === 'eval' ? match[2] : 'other'
-  return {
-    at,
-    kind,
-    name: match[3] === '-' ? '' : match[3],
-    ok: match[4] === 'ok',
-    state: match[4],
-    raw,
+  try {
+    const value = auditSchema.safeParse(JSON.parse(raw))
+    if (!value.success) return null
+    return {
+      at: Date.parse(value.data.at),
+      events: value.data.events,
+      ok: value.data.ok,
+      error: value.data.error,
+      raw: JSON.stringify(value.data),
+    }
+  } catch {
+    return null
   }
 }
 
@@ -42,8 +51,8 @@ export function summarizeUploads(lines: string[]): UploadSummary {
     .sort((a, b) => a.at - b.at)
   return {
     entries,
-    batch: entries.filter((e) => e.kind === 'batch').length,
-    evals: entries.filter((e) => e.kind === 'eval').length,
+    batch: entries.length,
+    events: entries.reduce((total, entry) => total + entry.events, 0),
     failed: entries.filter((e) => !e.ok).length,
     first: entries[0]?.at ?? null,
     last: entries.length ? entries[entries.length - 1].at : null,

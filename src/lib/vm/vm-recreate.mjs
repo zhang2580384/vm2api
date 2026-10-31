@@ -26,6 +26,13 @@ import {
 import { assignComputerFingerprint } from '../identity/slot-computer.mjs'
 
 const KEEP_HOME = [
+  'cli-home/.claude.json',
+  'cli-home/.claude/.claude.json',
+  'cli-home/.claude/settings.json',
+  'cli-home/.claude/settings.local.json',
+  'cli-home/.claude/claude.setting',
+  'cli-home/.claude/kin-identity.json',
+  'cli-home/.claude/telemetry',
   'cli-home/.claude/credentials.json',
   'cli-home/.claude/credentials.json.lock',
   'cli-home/.claude/.credentials.json',
@@ -39,16 +46,20 @@ function copyKept(src, dest) {
   const st = fs.lstatSync(src)
   if (st.isSymbolicLink()) {
     fs.symlinkSync(fs.readlinkSync(src), dest)
+    fs.lchownSync(dest, st.uid, st.gid)
     return
   }
   if (st.isDirectory()) {
-    fs.cpSync(src, dest, { recursive: true })
-    return
+    fs.mkdirSync(dest, { recursive: true, mode: st.mode & 0o777 })
+    for (const name of fs.readdirSync(src)) copyKept(path.join(src, name), path.join(dest, name))
+  } else {
+    fs.copyFileSync(src, dest)
   }
-  fs.copyFileSync(src, dest)
+  fs.chmodSync(dest, st.mode & 0o777)
+  fs.chownSync(dest, st.uid, st.gid)
 }
 
-/** Move account files and the existing computer identity out, then wipe the rest. */
+/** Keep-mode rebuild preserves VM-owned account, native identity/settings and telemetry backlog. */
 export function wipeSlotHome(projectRoot, id, { keepData = false } = {}) {
   if (!projectRoot || !id) return
   const home = path.join(projectRoot, 'vms', id)

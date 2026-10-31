@@ -1,24 +1,30 @@
 import { describe, expect, it } from 'vitest'
-import { seedSaveBody } from './seed-settings'
-import { telemetryEnabled } from './telemetry-policy'
+import { seedDraftOf, seedSaveBody, seedSaveState } from './seed-settings'
 
-describe('seed save follows the telemetry bit', () => {
-  it('drops contradictory mirrors so the switch stays on', () => {
-    const body = seedSaveBody({
-      telemetry_disabled: false,
-      disable_nonessential_traffic: false,
-      do_not_track: true,
-      reject_client_settings: true,
-      reject_client_metadata_identity: true,
-      claude_setting: 'A=1',
-      env: {},
-      theme: 'dark',
-      timezoneFollow: true,
-      timezoneFixed: '',
-      locale: 'en_US.UTF-8',
+describe('seed edit intent and publication acknowledgment', () => {
+  it('does not undo an external opt-out from a stale unlocked theme draft', () => {
+    const baseline = seedDraftOf({
+      seed_policy: { telemetry_disabled: false },
+      settings_json: { theme: 'dark' },
     })
-    expect(telemetryEnabled(body)).toBe(true)
-    expect(body.disable_nonessential_traffic).toBe(true)
-    expect(body.do_not_track).toBe(false)
+    const body = seedSaveBody({ ...baseline, theme: 'light' }, baseline)
+    expect(body).not.toHaveProperty('telemetry_disabled')
+    expect(body).not.toHaveProperty('do_not_track')
+  })
+
+  it('does not treat saved or published policy as native acknowledgment', () => {
+    expect(
+      seedSaveState({ saved: true, published: false, applied: false })
+    ).toBe('saved')
+    expect(
+      seedSaveState({ saved: true, published: true, applied: false })
+    ).toBe('published')
+    expect(seedSaveState({ saved: true, published: true, applied: true })).toBe(
+      'applied'
+    )
+    expect(seedSaveState({ saved: true, service: { supported: false } })).toBe(
+      'unsupported'
+    )
+    expect(seedSaveState({})).toBe('unknown')
   })
 })

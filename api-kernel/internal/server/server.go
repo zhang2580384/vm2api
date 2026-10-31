@@ -15,6 +15,19 @@ type Server struct {
 	Pool  *pool.Manager
 }
 
+type flushingWriter struct {
+	w       io.Writer
+	flusher http.Flusher
+}
+
+func (w flushingWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	if err == nil {
+		w.flusher.Flush()
+	}
+	return n, err
+}
+
 type forwardEnv struct {
 	Method   string            `json:"method"`
 	URL      string            `json:"url"`
@@ -94,6 +107,13 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
+	contentType, _, _ := strings.Cut(resp.Header.Get("Content-Type"), ";")
+	if flusher, ok := w.(http.Flusher); ok && strings.EqualFold(strings.TrimSpace(contentType), "text/event-stream") {
+		// net/http otherwise buffers small SSE frames until completion, losing
+		// both interactive delivery and the upstream token timing boundary.
+		_, _ = io.Copy(flushingWriter{w: w, flusher: flusher}, resp.Body)
+		return
+	}
 	_, _ = io.Copy(w, resp.Body)
 }
 

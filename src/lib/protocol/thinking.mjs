@@ -1,3 +1,5 @@
+import { REASONING_EFFORTS, reasoningEffortOf } from './log-fields.mjs'
+
 import { BETA_THINKING_DISPLAY_UPDATES } from './claude-code-betas.mjs'
 
 import {
@@ -293,7 +295,7 @@ export function stripUnsupportedEffort(body = {}) {
   return { ...out, messages: mergeConsecutiveAnthropicMessages(messages) }
 }
 
-/** Official fill: missing output_config.effort. Never overwrite. Opus 5.5 defaults to medium. */
+/** Official fill: missing output_config.effort. `default_effort: off` adds nothing. */
 export function ensureUnofficialEffortHigh(body = {}) {
   if (!body || typeof body !== 'object') return body
   if (!modelSupportsEffort(body.model)) return stripUnsupportedEffort(body)
@@ -303,9 +305,53 @@ export function ensureUnofficialEffortHigh(body = {}) {
   } catch {
     effort = 'high'
   }
+  if (effort === 'off') return body
   if (body.output_config && typeof body.output_config === 'object') {
     if (body.output_config.effort != null && body.output_config.effort !== '') return body
     return { ...body, output_config: { ...body.output_config, effort } }
   }
   return { ...body, output_config: { effort } }
+}
+
+// Same order as cli-node getDefaultEffortForModel: longer ids first.
+const CATALOG_EFFORT = [
+  ['haiku-5', 'medium'],
+  ['sonnet-5-5', 'medium'],
+  ['sonnet-5', 'high'],
+  ['sonnet-4-6', 'high'],
+  ['opus-5-5', 'medium'],
+  ['opus-5', 'high'],
+  ['opus-4-8', 'high'],
+  ['opus-4-7', 'xhigh'],
+  ['opus-4-6', 'xhigh'],
+  ['fable-5-1', 'high'],
+  ['fable-5', 'high'],
+  ['mythos-5-1', 'high'],
+]
+
+function catalogEffort(model) {
+  const id = String(model || '').toLowerCase()
+  const hit = CATALOG_EFFORT.find(([needle]) => id.includes(needle))
+  return hit ? hit[1] : null
+}
+
+/**
+ * Effort column. Caller or outbound field wins. Otherwise the level cli-node
+ * attaches: panel default_effort, else the catalog default. `off` stays null.
+ * Models that reject effort stay null.
+ */
+export function loggedReasoningEffort(body) {
+  const explicit = reasoningEffortOf(body)
+  if (explicit) return explicit
+  if (!body || typeof body !== 'object' || !modelSupportsEffort(body.model)) return null
+  let configured
+  try {
+    configured = getModelParams(body.model)?.default_effort
+  } catch {
+    configured = undefined
+  }
+  if (!configured) configured = catalogEffort(body.model) || 'high'
+  if (configured === 'off') return null
+  const effort = String(configured).trim().toLowerCase()
+  return REASONING_EFFORTS.has(effort) ? effort : null
 }

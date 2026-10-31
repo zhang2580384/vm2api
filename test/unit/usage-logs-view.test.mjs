@@ -277,6 +277,22 @@ test('row badges: via only when non-default, context1m from long_context, fast/p
   assert.equal(logs.find((r) => r.id === plain.id).context1mApplied, null)
 })
 
+test('#777 badge: sent priority with a non-priority upstream echo is a Fast downgrade', () => {
+  const db = freshDb()
+  const [downgraded, honored, unechoed] = seed(db, [
+    { protocol: 'openai.responses', service_tier: 'priority', upstream_service_tier: 'default' },
+    { protocol: 'openai.responses', service_tier: 'priority', upstream_service_tier: 'priority' },
+    { protocol: 'openai.responses', service_tier: 'priority' },
+  ])
+  const logs = new UsageLogsView(db).listBatch({}).logs
+  const row = (id) => logs.find((r) => r.id === id)
+  const downgrade = (id) => row(id).specialSettings.find((s) => s.key === 'tier_downgrade')
+  assert.equal(downgrade(downgraded.id)?.value, 'priority → default')
+  assert.equal(row(downgraded.id).upstreamServiceTier, 'default')
+  assert.equal(downgrade(honored.id), undefined)
+  assert.equal(downgrade(unechoed.id), undefined)
+})
+
 test('overview splits today/yesterday-same-time in the requested zone', () => {
   const db = freshDb()
   const now = Date.parse('2026-03-10T04:00:00Z') // 12:00 in Shanghai

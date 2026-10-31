@@ -120,11 +120,17 @@ export function estimatePromptTokens(body, quotaRequest = null) {
  * First turn / prefix break / unconfirmed attempt / missing session → cold.
  * Warm only after a previous hop on this account+session was confirmed.
  */
-export function cacheColdForAccount({ accountId = null, sessionId = null, body = null, now = Date.now() } = {}) {
+export function cacheColdForAccount({
+  accountId = null,
+  sessionId = null,
+  body = null,
+  now = Date.now(),
+  preserveMessageCache = null,
+} = {}) {
   const account = String(accountId || '').trim()
   const session = String(sessionId || '').trim()
   if (!account || !session || !body) return { cold: true, reason: 'unknown', prefix: null }
-  const prefix = peekCachePrefix(`${account}:${session}`, body, now)
+  const prefix = peekCachePrefix(`${account}:${session}`, body, now, { preserveMessageCache })
   if (!prefix) return { cold: true, reason: 'unknown', prefix: null }
   if (prefix.turn <= 1) return { cold: true, reason: 'first_turn', prefix }
   if (!prefix.confirmed) return { cold: true, reason: 'unconfirmed', prefix }
@@ -143,7 +149,13 @@ export function estimateRequestRisk(
   } = {},
 ) {
   const parts = cachedPromptParts(body, quotaRequest)
-  const cache = cacheColdForAccount({ accountId, sessionId, body, now })
+  const cache = cacheColdForAccount({
+    accountId,
+    sessionId,
+    body,
+    now,
+    preserveMessageCache: quotaRequest?.preserveMessageCache,
+  })
   const uncached = cache.cold ? parts.prompt : parts.lastUser
   return {
     estimatedPromptTokens: parts.prompt,

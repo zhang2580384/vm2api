@@ -13,9 +13,10 @@ import { maxRequestBytes, readRoutingConfigFile, streamIdleTimeoutMs } from '../
 import { US_TIMEZONES, validTimezone } from '../core/timezone.mjs'
 import { runtimeKind, isKvmRuntime, RUNTIME_KVM } from './runtime-kind.mjs'
 import { isCodexVm } from './vm-kind.mjs'
-import { buildWorkerTelemetry } from './worker-telemetry.mjs'
+import { defaultSeedPolicy, isTelemetryEnabled } from '../protocol/seed-policy.mjs'
 import { kernelBinPath, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
-import { assertCliHopAllowed, resolveOfficialCcInference } from './slot-engine.mjs'
+import { assertCliHopAllowed, resolveOfficialCcInference, resolveSlotPersonaPreset } from './slot-engine.mjs'
+import { profileForPreset } from '../identity/official-profiles.mjs'
 import { ensureSlotClaudeOwnership, chownSlotRuntimeFile, replaceSlotOwnedFile } from '../oauth/oauth-credentials.mjs'
 import { materializeWrapCli } from './wrap-cli-runtime.mjs'
 import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mjs'
@@ -34,7 +35,8 @@ import {
   kvmImageForKernel,
   KVM_BUILD_DIR,
 } from './os-catalog.mjs'
-import { slotMemory, slotDockerCpus, memoryMiB, VM_CONFIG_DEFAULTS } from './machine-spec.mjs'
+import { slotMemory, slotDockerCpus, memoryMiB } from './machine-spec.mjs'
+import { ensureKvmMachineRecord, kvmContainerEnvIncomplete, kvmMachineFields } from './kvm-machine.mjs'
 import { probeLocalKvm } from './kvm-host.mjs'
 import { slotExecArgv } from './slot-exec.mjs'
 import { isDockerInspectNotFound } from './docker-container.mjs'
@@ -403,21 +405,14 @@ export function isSlotProxyDesynced(vm, projectRoot) {
   return want !== have
 }
 
-/** Write worker.json.telemetry from seed_policy. Does not bounce the process. */
-export function syncWorkerTelemetry(vm, projectRoot, routing = null) {
-  if (!vm?.id || !projectRoot) return { wrote: false }
-  const paths = workerPaths(projectRoot, vm.id)
-  if (!fs.existsSync(paths.config)) return { wrote: false }
-  let doc
-  try {
-    doc = JSON.parse(fs.readFileSync(paths.config, 'utf8'))
-  } catch {
-    return { wrote: false }
-  }
-  if (!doc || typeof doc !== 'object') return { wrote: false }
-  doc.telemetry = buildWorkerTelemetry(vm, projectRoot, routing)
-  replaceSlotOwnedFile(paths.config, JSON.stringify(doc, null, 2) + '\n', vm)
-  return { wrote: true, enabled: doc.telemetry.enabled === true }
+/** Publish native kernel telemetry routing. kin-seed remains the sole policy authority. */
+export function syncNativeTelemetry(vm, projectRoot, routing = null, { publish = true } = {}) {
+  if (!vm?.id || !projectRoot) return { wrote: false, supported: false, enabled: false }
+  const supported = !isCodexVm(vm) && !slotHost(vm).native
+  const enabled = supported && isTelemetryEnabled(defaultSeedPolicy(vm.seed_policy || {}))
+  if (!supported) return { wrote: false, supported, enabled, error: 'telemetry_unsupported' }
+  const written = writeKernelConfig(projectRoot, vm, { routing, publish })
+  return { wrote: !!written, supported, enabled, changed: written?.changed === true }
 }
 
 /** Running container is still attached to a different kin-eg-* than vm.proxy.id. */
@@ -472,7 +467,6 @@ export async function reloadSlotWorker(vm, projectRoot, { routing } = {}) {
       if (!r.ok) return { ok: false, error: r.stderr || 'docker start failed' }
       const chownErr = applyKvmBindChown(name, vm)
       if (chownErr) return chownErr
-      startTelemetrySidecar(name, vm)
       runtimePatch(vm, inspectContainer(name), {
         ...workerRuntimeExtra(worker),
         memory: slotMemory(vm, routing),
@@ -494,7 +488,6 @@ export async function reloadSlotWorker(vm, projectRoot, { routing } = {}) {
       { timeout: 60_000 },
     )
     if (!r.ok) return { ok: false, error: r.stderr || 'guest kernel restart failed' }
-    startTelemetrySidecar(name, vm)
     runtimePatch(vm, inspectContainer(name), {
       ...workerRuntimeExtra(worker),
       memory: slotMemory(vm, routing),
@@ -505,7 +498,6 @@ export async function reloadSlotWorker(vm, projectRoot, { routing } = {}) {
   const cmd = existing.running ? ['docker', 'restart', name] : ['docker', 'start', name]
   const r = sh(cmd, { timeout: 60_000 })
   if (!r.ok) return { ok: false, error: r.stderr || `${cmd.join(' ')} failed` }
-  startTelemetrySidecar(name, vm)
   runtimePatch(vm, inspectContainer(name), { ...workerRuntimeExtra(worker), memory: slotMemory(vm, routing), routing })
   return { ok: true, action: existing.running ? 'reloaded' : 'started', runtime: vm.runtime }
 }
@@ -519,24 +511,6 @@ export function slotKernelAlive(existing, paths, vm) {
   if (isKvmRuntime(vm) || existing?.runtime === 'kvm') return true
   if (isCodexVm(vm) && existing?.role === CODEX_SLOT_ROLE) return true
   return fs.existsSync(paths.kernelSocket)
-}
-
-/** The telemetry sidecar is a docker exec child: every container (re)start loses it. */
-function startTelemetrySidecar(name, vm) {
-  if (!fs.existsSync(WORKER_BIN)) return
-  const target = { ...(vm || {}), runtime: { ...(vm?.runtime || {}), container: name, type: runtimeKind(vm) } }
-  if (!target.id && name) target.id = `vm-${String(name).replace(/^kin-/, '')}`
-  sh(
-    [
-      'docker',
-      ...slotExecArgv(target, ['/usr/local/bin/kin-worker', 'telemetry', '--config', '/run/kin/worker.json'], {
-        detach: true,
-      }),
-    ],
-    {
-      timeout: 8_000,
-    },
-  )
 }
 
 function readProjectRouting(projectRoot) {
@@ -601,10 +575,10 @@ export function writeWorkerFiles(vm, projectRoot, { transparent, routing } = {})
     idle_timeout_seconds: Math.ceil(streamIdleTimeoutMs(resolvedRouting) / 1000),
     max_request_bytes: maxRequestBytes(resolvedRouting),
     max_response_bytes: 64 * 1024 * 1024,
-    max_event_bytes: 32 * 1024 * 1024,
+    max_event_bytes: 64 * 1024 * 1024,
     test_endpoints: testEndpoints,
     runtime_kind: runtimeKind(vm),
-    telemetry: buildWorkerTelemetry(vm, projectRoot),
+    cli_version: profileForPreset(resolveSlotPersonaPreset(vm, resolvedRouting)).cliVersion,
   }
   if (onEgress || local) workerConfig.egress_mode = 'transparent'
   if (testEndpoints) {
@@ -653,27 +627,6 @@ export function shouldReplaceSlotContainer({ existing, recreate = false, network
   const haveRuntime = existing.runtime || 'docker'
   const wrongRuntime = runtime != null && haveRuntime !== runtime
   return !!(wrongNet || wrongImg || wrongRuntime)
-}
-
-function kvmMachineFields(vm) {
-  const m = vm.machine && typeof vm.machine === 'object' ? vm.machine : {}
-  const smbios = m.smbios && typeof m.smbios === 'object' ? m.smbios : {}
-  const d = VM_CONFIG_DEFAULTS
-  return {
-    vcpus: Number.isInteger(m.vcpus) ? m.vcpus : d.vcpus,
-    disk_gb: Number.isInteger(m.disk_gb) ? m.disk_gb : d.disk_gb,
-    cpu_model: m.cpu_model || d.cpu_model,
-    mac: m.mac || '',
-    smbios: {
-      manufacturer: smbios.manufacturer || d.smbios.manufacturer,
-      product: smbios.product || d.smbios.product,
-      version: smbios.version || d.smbios.version,
-      family: smbios.family || d.smbios.family,
-      serial: smbios.serial || '',
-      uuid: smbios.uuid || '',
-    },
-    disk_serial: m.disk_serial || '',
-  }
 }
 
 function kvmEnvPairs(vm, { uid, gid, memMb, accel, hostName, machineId, shares, smbios }) {
@@ -773,8 +726,8 @@ function readFingerprintSmbios(kvmDir) {
 }
 
 /**
- * Host directory bind-mounted into slots: only kin-worker + kin-kernel, never the full deploy
- * bin/ (which also holds kin-egress, kin-api-kernel, etc.). It sits under data/: the control
+ * Host directory bind-mounted into slots: only kin-worker, kin-kernel and kin-oauth-auth,
+ * never the full deploy bin/ (which also holds kin-egress, kin-api-kernel, etc.). It sits under data/: the control
  * container bind-mounts only bin/, data/, share/, vms/ and src/config, so a dir elsewhere would
  * exist only inside it and the host would mount an empty one into the slot. Entries are hard
  * links (copies across mounts): a symlink to the host path dangles inside the slot.
@@ -787,7 +740,14 @@ export function slotGuestBinDir(projectRoot) {
   return path.join(projectRoot, 'data', 'run', 'slot-guest-bin')
 }
 
-export function ensureSlotGuestBinDir(projectRoot, { workerBin, kernelBin } = {}) {
+export function oauthAuthBinPath(projectRoot) {
+  return String(process.env.KIN_OAUTH_AUTH_BIN || '').trim() || path.join(projectRoot, 'bin', 'kin-oauth-auth')
+}
+
+export function ensureSlotGuestBinDir(
+  projectRoot,
+  { workerBin, kernelBin, oauthAuthBin = oauthAuthBinPath(projectRoot) } = {},
+) {
   if (!projectRoot) throw new Error('projectRoot required')
   const dir = slotGuestBinDir(projectRoot)
   fs.mkdirSync(dir, { recursive: true, mode: 0o755 })
@@ -824,6 +784,7 @@ export function ensureSlotGuestBinDir(projectRoot, { workerBin, kernelBin } = {}
   }
   link('kin-worker', workerBin)
   link('kin-kernel', kernelBin)
+  link('kin-oauth-auth', oauthAuthBin)
   return dir
 }
 
@@ -837,16 +798,26 @@ export function refreshSlotGuestBinDir(projectRoot) {
  * Mount the slot guest bin staging dir so replacing files on the host is visible inside the
  * container without recreate (single-file bind mounts pin the old inode).
  */
-export function slotGuestBinMountArgs({ workerBin, kernelBin, guestBinDir, hostOf = (p) => p, projectRoot }) {
-  const bins = [workerBin, kernelBin].filter(Boolean)
+export function slotGuestBinMountArgs({
+  workerBin,
+  kernelBin,
+  oauthAuthBin,
+  guestBinDir,
+  hostOf = (p) => p,
+  projectRoot,
+}) {
+  const helper = oauthAuthBin || (projectRoot ? oauthAuthBinPath(projectRoot) : null)
+  const availableHelper = helper && fs.existsSync(helper) ? helper : null
+  const bins = [workerBin, kernelBin, availableHelper].filter(Boolean)
   if (!bins.length) return []
   if (projectRoot) {
-    const stage = ensureSlotGuestBinDir(projectRoot, { workerBin, kernelBin })
+    const stage = ensureSlotGuestBinDir(projectRoot, { workerBin, kernelBin, oauthAuthBin: availableHelper })
     return ['-v', `${hostOf(stage)}:${guestBinDir}:ro`]
   }
   const args = []
   if (workerBin) args.push('-v', `${hostOf(workerBin)}:${guestBinDir}/kin-worker:ro`)
   if (kernelBin) args.push('-v', `${hostOf(kernelBin)}:${guestBinDir}/kin-kernel:ro`)
+  if (availableHelper) args.push('-v', `${hostOf(availableHelper)}:${guestBinDir}/kin-oauth-auth:ro`)
   return args
 }
 
@@ -1003,6 +974,9 @@ export async function startVmRuntime(vm, projectRoot, { recreate = false, routin
   if (!eg.network && !eg.name) return { ok: false, error: 'egress network missing; refusing host fallback' }
 
   let existing = inspectContainer(name)
+  if (kvm && existing) {
+    ensureKvmMachineRecord(vm, { projectRoot, containerName: name, run: sh, persist: true })
+  }
   const restartPolicy = updateSlotRestartPolicy(vm, existing, sh)
   if (!restartPolicy.ok) return { ok: false, error: restartPolicy.stderr || 'slot restart policy update failed' }
   const paths = workerPaths(projectRoot, vm.id)
@@ -1043,15 +1017,16 @@ export async function startVmRuntime(vm, projectRoot, { recreate = false, routin
     fs.chownSync(home, runtimeUidNum(vm), Number(GID))
   } catch {}
 
-  if (
+  const replaceContainer =
     shouldReplaceSlotContainer({
       existing,
       recreate: replace,
       network: slotNetworkForVm(vm),
       image,
       runtime: runtimeKind(vm),
-    })
-  ) {
+    }) ||
+    (kvm && existing && kvmContainerEnvIncomplete(name, { run: sh }))
+  if (replaceContainer) {
     // Container only. Host bind mounts (cli-home, run, kvm/, machine-id) stay.
     sh(['docker', 'rm', '-f', name])
     existing = null
@@ -1067,7 +1042,6 @@ export async function startVmRuntime(vm, projectRoot, { recreate = false, routin
     if (!r.ok) return { ok: false, error: r.stderr || 'docker start failed' }
     const chownErr = applyKvmBindChown(name, vm)
     if (chownErr) return chownErr
-    startTelemetrySidecar(name, vm)
     runtimePatch(vm, inspectContainer(name), { ...workerRuntimeExtra(worker), memory: mem, routing: resolvedRouting })
     return { ok: true, action: 'started', runtime: vm.runtime }
   }
@@ -1225,7 +1199,6 @@ export async function startVmRuntime(vm, projectRoot, { recreate = false, routin
     ...(kvm ? { accel: accelOpt } : {}),
     ...workerRuntimeExtra(worker),
   })
-  startTelemetrySidecar(name, vm)
   return { ok: true, action: 'created', runtime: vm.runtime }
 }
 

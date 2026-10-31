@@ -12,6 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { kernelBinPath } from '../transport/rust-kernel-supervisor.mjs'
 import { isCodexVm } from './vm-kind.mjs'
+import { nativeCliForVm, NATIVE_CLI_FILES } from './native-cli.mjs'
 import { resolveKernelDataplane } from './slot-engine.mjs'
 
 export const WRAP_CLI_BIN = 'cli-node'
@@ -286,11 +287,11 @@ function copyFile(src, dest) {
   replaceFile(src, dest)
 }
 
-function copyDir(src, dest) {
+function copyDir(src, dest, { exclude = [] } = {}) {
   if (!isDir(src)) return
   fs.mkdirSync(dest, { recursive: true })
   for (const name of fs.readdirSync(src)) {
-    if (SECRET_NAMES.has(name)) continue
+    if (SECRET_NAMES.has(name) || exclude.includes(name)) continue
     const from = path.join(src, name)
     const to = path.join(dest, name)
     let st
@@ -299,7 +300,7 @@ function copyDir(src, dest) {
     } catch {
       continue
     }
-    if (st.isDirectory()) copyDir(from, to)
+    if (st.isDirectory()) copyDir(from, to, { exclude })
     else if (st.isFile()) replaceFile(from, to)
   }
 }
@@ -447,25 +448,34 @@ function installKernelPayload(src, dest, projectRoot = '') {
   const binSrc = kernelPayloadPath(src, projectRoot)
   const kernelChanged = binSrc && isFile(binSrc) ? replaceFile(binSrc, path.join(dest, WRAP_KERNEL_BIN)) : false
   const glibcSrc = path.join(src, WRAP_GLIBC_DIR)
-  if (isDir(glibcSrc)) copyDir(glibcSrc, path.join(dest, WRAP_GLIBC_DIR))
+  if (isDir(glibcSrc)) copyDir(glibcSrc, path.join(dest, WRAP_GLIBC_DIR), { exclude: ['arm64'] })
   writeWrapper(dest)
   return kernelChanged
 }
 
-export function materializeWrapCli(projectRoot, vm, { uid = null, gid = null } = {}) {
+export function materializeWrapCli(projectRoot, vm, { uid = null, gid = null, nativeCliOptions } = {}) {
   if (!projectRoot || !vm?.id) {
     return { ok: false, code: 'vm_required', error: 'projectRoot and vm id required' }
   }
   const src = wrapCliTemplateDir(projectRoot)
   const status = inspectWrapCliDir(src)
   if (!status.ok) return status
+  const native = nativeCliForVm(vm, src, nativeCliOptions)
+  if (native && !native.ok) return native
   const dest = wrapCliHomeDir(projectRoot, vm.id)
   fs.mkdirSync(dest, { recursive: true })
-  let payloadChanged = false
-  for (const name of WRAP_CLI_FILES) {
-    payloadChanged = replaceFile(path.join(src, name), path.join(dest, name)) || payloadChanged
-  }
   const kernelChanged = installKernelPayload(src, dest, projectRoot)
+  let payloadChanged = false
+  // Install runtime dependencies before making the native entry point visible.
+  if (native?.ok) {
+    for (const name of NATIVE_CLI_FILES.filter((file) => file !== WRAP_CLI_BIN)) {
+      payloadChanged = replaceFile(path.join(native.dir, name), path.join(dest, name)) || payloadChanged
+    }
+  }
+  for (const name of WRAP_CLI_FILES) {
+    const from = native?.ok && name === WRAP_CLI_BIN ? native.dir : src
+    payloadChanged = replaceFile(path.join(from, name), path.join(dest, name)) || payloadChanged
+  }
   const changed = payloadChanged || kernelChanged
   chownTree(dest, uid, gid)
   return {
@@ -500,6 +510,13 @@ function copyWrapTree(src, dest) {
 export function captureWrapSample(projectRoot, vm) {
   if (!projectRoot || !vm?.id) {
     return { ok: false, code: 'vm_required', error: 'projectRoot and vm id required' }
+  }
+  if (nativeCliForVm(vm, wrapCliTemplateDir(projectRoot)) !== null) {
+    return {
+      ok: false,
+      code: 'native_cli_capture_unsupported',
+      error: 'Do not promote a native slot into the portable template',
+    }
   }
   const src = wrapCliHomeDir(projectRoot, vm.id)
   const status = inspectWrapCliDir(src)
@@ -723,14 +740,23 @@ function kernelWouldChange(src, dest) {
   return !filesEqual(src, dest)
 }
 
-function payloadWouldChange(srcDir, destDir, projectRoot) {
+function payloadWouldChange(srcDir, destDir, projectRoot, native) {
   const pairs = [
-    ...WRAP_CLI_FILES.map((name) => [path.join(srcDir, name), path.join(destDir, name)]),
+    ...WRAP_CLI_FILES.map((name) => [
+      path.join(native?.ok && name === WRAP_CLI_BIN ? native.dir : srcDir, name),
+      path.join(destDir, name),
+    ]),
+    ...(native?.ok
+      ? NATIVE_CLI_FILES.filter((name) => name !== WRAP_CLI_BIN).map((name) => [
+          path.join(native.dir, name),
+          path.join(destDir, name),
+        ])
+      : []),
     [kernelPayloadPath(srcDir, projectRoot), path.join(destDir, WRAP_KERNEL_BIN)],
   ]
   return pairs.some(([src, dest]) => kernelWouldChange(src, dest))
 }
-export function inspectKernelChanges(projectRoot, vms, { routing } = {}) {
+export function inspectKernelChanges(projectRoot, vms, { routing, nativeCliOptions } = {}) {
   const sample = describeWrapSample(projectRoot)
   const crag = describeCragPayload(projectRoot)
   const items = []
@@ -747,10 +773,15 @@ export function inspectKernelChanges(projectRoot, vms, { routing } = {}) {
       items.push({ id: vm.id, dataplane, ok: false, code: sample.code, kernel_changed: false })
       continue
     }
+    const native = dataplane === 'crag' ? null : nativeCliForVm(vm, sample.dir, nativeCliOptions)
+    if (native && !native.ok) {
+      items.push({ id: vm.id, dataplane, ...native, kernel_changed: false })
+      continue
+    }
     const kernelChanged =
       (dataplane === 'crag'
         ? kernelWouldChange(src, path.join(destDir, WRAP_KERNEL_BIN))
-        : payloadWouldChange(sample.dir, destDir, projectRoot)) || Boolean(vm?.kernel_restart_pending)
+        : payloadWouldChange(sample.dir, destDir, projectRoot, native)) || Boolean(vm?.kernel_restart_pending)
     items.push({ id: vm.id, dataplane, ok: true, kernel_changed: kernelChanged })
   }
   const failed = items.filter((item) => !item.ok)

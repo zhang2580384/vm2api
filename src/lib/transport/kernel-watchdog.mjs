@@ -75,9 +75,6 @@ export const DEFAULT_KERNEL_WATCHDOG = Object.freeze({
   restart_window_sec: 3600,
 })
 
-// A missing sidecar costs telemetry, not inference: one docker exec per slot per window is enough.
-const TELEMETRY_HEAL_MS = 10 * 60 * 1000
-
 function clampInt(value, min, max, fallback) {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) return fallback
@@ -105,11 +102,6 @@ export function isKernelWatchdogTarget(vm, routing = {}) {
   // Effective engine, not the slot's own fields: panel-created slots omit
   // inference_engine and inherit routing.inference.engine (usually rust).
   return resolveInferenceEngine(vm, routing) === 'rust'
-}
-
-function isTelemetryHealTarget(vm) {
-  if (!vm?.id) return false
-  return !HARD_DOWN.has(String(vm.status || '').toLowerCase())
 }
 
 /** A node slot answers through an SSH relay across the ocean (~110ms RTT); 800ms misfires there. */
@@ -156,8 +148,6 @@ export function createKernelWatchdog({
   health = rustKernelHealth,
   observeRuntime = observeWatchdogContainer,
   onFault = null,
-  ensureTelemetry = null,
-  telemetryEveryMs = TELEMETRY_HEAL_MS,
   revive = null,
   healBridges = null,
   probeVm = watchdogProbeVm,
@@ -169,14 +159,11 @@ export function createKernelWatchdog({
   let inTick = false
   // vmId -> { attempts: [ms], nextAt }
   const restarts = new Map()
-  // vmId -> next ms a telemetry sidecar check is due
-  const telemetryDue = new Map()
   // VMs under an operator power cycle: the watchdog must not restart them mid-cycle.
   const held = new Set()
   // vmId -> this tick's pending check/restart, so hold() can wait for it to settle.
   const inflight = new Map()
   let healingBridges = false
-  let telemetryPending = 0
 
   function healBridgesOffPath(vms) {
     if (typeof healBridges !== 'function' || healingBridges) return
@@ -187,23 +174,6 @@ export function createKernelWatchdog({
       .finally(() => {
         healingBridges = false
       })
-  }
-
-  async function healTelemetry(vm, at) {
-    if (typeof ensureTelemetry !== 'function' || at < (telemetryDue.get(vm.id) || 0)) return
-    telemetryDue.set(vm.id, at + telemetryEveryMs)
-    telemetryPending++
-    try {
-      const result = await ensureTelemetry(vm)
-      if (result?.action === 'started')
-        console.warn(`[kernel-watchdog] ${vm.id} telemetry sidecar was missing; relaunched`)
-      if (result?.ok === false)
-        console.warn(`[kernel-watchdog] ${vm.id} telemetry sidecar relaunch failed: ${result.error}`)
-    } catch (error) {
-      console.warn(`[kernel-watchdog] ${vm.id} telemetry sidecar check failed: ${error?.message || error}`)
-    } finally {
-      telemetryPending--
-    }
   }
 
   /** L4 gate: bounded container restarts with growing waits; spending them is L5. */
@@ -301,11 +271,6 @@ export function createKernelWatchdog({
       const routing = typeof getRouting === 'function' ? getRouting() || {} : {}
       for (const vm of vms) {
         if (held.has(vm.id)) continue
-        // Telemetry sidecar heal is independent of kernel-restart targeting: a
-        // missing sidecar costs telemetry, not inference. Off the tick's critical
-        // path so a slow docker exec cannot delay container restarts. The due time
-        // is set before the check runs, so a slot never has two checks in flight.
-        if (isTelemetryHealTarget(vm)) void healTelemetry(vm, now())
         if (!isKernelWatchdogTarget(vm, routing)) continue
         const work = checkVm(vm, routing)
         inflight.set(vm.id, work)
@@ -326,9 +291,6 @@ export function createKernelWatchdog({
   }
 
   return {
-    get busy() {
-      return inTick || healingBridges || telemetryPending > 0 || inflight.size > 0
-    },
     setConfig(next) {
       config = normalizeKernelWatchdogConfig(next || {})
     },

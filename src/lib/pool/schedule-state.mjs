@@ -16,6 +16,8 @@ export const SCHEDULE_STATES = Object.freeze(['on', 'off', 'unschedulable', 'res
 /** Deterministic failures. Text is the panel label after 「不可调度 ·」. */
 const UNSCHEDULABLE_REASONS = Object.freeze({
   no_credential: '无凭证',
+  account_missing: '账号不存在',
+  account_disabled: '账号已禁用',
   oauth_revoked: '凭证吊销',
   oauth_invalid_grant: '凭证失效',
   oauth_no_refresh: '无刷新令牌',

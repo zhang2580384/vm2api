@@ -3,6 +3,7 @@ import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
 import { resetCountdown } from '@/lib/fable-status'
 import { fmtNum, fmtUsd } from '@/lib/format'
+import { subscriptionListLabel } from '@/lib/subscription-expiry'
 import { cn } from '@/lib/utils'
 import { slotCredentialLabel } from '@/lib/vm-kind'
 import { vmCostLedger } from '@/lib/vm-usage'
@@ -102,7 +103,11 @@ export const VmUnit = memo(function VmUnit({
         <TierBadge vm={vm} className='ms-auto h-4 px-1 text-[9.5px]' />
       </div>
       <span
-        title={email || undefined}
+        title={
+          [email, subscriptionListLabel(vm, now).text]
+            .filter(Boolean)
+            .join('\n') || undefined
+        }
         className={cn(
           'col-span-2 truncate text-[12.5px] font-semibold',
           !email && 'font-medium text-muted-foreground'

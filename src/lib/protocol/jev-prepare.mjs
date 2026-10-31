@@ -1,8 +1,10 @@
 /**
  * Text the safety model actually sees.
- * Same two passes as jev-safety-gateway: drop <system-reminder> blocks first,
- * then decode long standard-base64 runs that are real text. A payload inside
- * a reminder is dropped with the reminder. Hashes, ids, and binary stay put.
+ * Drop closed <system-reminder> blocks, then decode long standard-base64 runs
+ * that are real text. A payload inside a closed reminder goes with it.
+ * An unclosed tag is not a reminder: the following user text stays.
+ * `# Environment` sections are workstation facts, not the ask.
+ * Hashes, ids, and binary stay put.
  */
 
 const REMINDER_OPEN = '<system-reminder>'
@@ -34,6 +36,38 @@ function indexFold(text, needle, from) {
   return -1
 }
 
+const ENV_HEADING = /^[ \t]*# Environment\b/
+const ENV_META = /^[ \t]*(?:# Environment\b.*|You have been invoked in the following environment:\s*|-\s+\S.*)$/
+
+/**
+ * Drop `# Environment` metadata lines only.
+ * A blank line, or any line that is not a metadata bullet, ends the block,
+ * so a user sentence after the section stays.
+ */
+export function stripEnvironmentSection(text) {
+  const src = String(text || '')
+  const lines = src.split('\n')
+  const out = []
+  let dropping = false
+  for (const line of lines) {
+    if (!dropping) {
+      if (ENV_HEADING.test(line)) dropping = true
+      else out.push(line)
+      continue
+    }
+    if (line.trim() === '') {
+      dropping = false
+      out.push(line)
+      continue
+    }
+    if (!ENV_META.test(line)) {
+      dropping = false
+      out.push(line)
+    }
+  }
+  return out.join('\n').trim()
+}
+
 export function stripReminders(text) {
   let rest = String(text || '')
   if (indexFold(rest, REMINDER_OPEN, 0) < 0) return rest
@@ -45,10 +79,14 @@ export function stripReminders(text) {
       break
     }
     out += rest.slice(0, open)
-    rest = rest.slice(open + REMINDER_OPEN.length)
-    const close = indexFold(rest, REMINDER_CLOSE, 0)
-    if (close < 0) break
-    rest = rest.slice(close + REMINDER_CLOSE.length)
+    const after = rest.slice(open + REMINDER_OPEN.length)
+    const close = indexFold(after, REMINDER_CLOSE, 0)
+    // No close tag: the opener is literal text, not a block to delete through.
+    if (close < 0) {
+      out += rest.slice(open)
+      break
+    }
+    rest = after.slice(close + REMINDER_CLOSE.length)
   }
   return out.trim()
 }
@@ -139,9 +177,13 @@ export function expandBase64(text) {
   return current
 }
 
-export function prepareInterceptText(text, { stripReminders: strip = true, expandBase64: expand = true } = {}) {
+export function prepareInterceptText(
+  text,
+  { stripReminders: strip = true, expandBase64: expand = true, stripEnvironment: env = true } = {},
+) {
   let out = String(text || '')
   if (strip) out = stripReminders(out)
+  if (env) out = stripEnvironmentSection(out)
   if (expand) out = expandBase64(out)
   return out.trim()
 }

@@ -15,6 +15,7 @@ import {
   personaHideEnabled,
   personaPresetLabel,
   presetFlagEnabled,
+  migrateLegacyOfficialTemplate,
   previewModelSentence,
   previewSystemBlocks,
   selectedPreviewBlocks,
@@ -104,7 +105,11 @@ export function SystemPreview({
     !!standing &&
     presetFlagEnabled(compat, 'agent_standing_hide_presets', preset)
   const blocksMasked = personaHideEnabled(compat, preset, blocks)
-  const selected = selectedPreviewBlocks(blocks, compat, preset)
+  const selected = selectedPreviewBlocks(
+    migrateLegacyOfficialTemplate(preset, blocks),
+    compat,
+    preset
+  )
   const timezoneOnly =
     preset === 'official_full' &&
     !templateBlockEnabled(compat, preset, 'env_official')
@@ -130,9 +135,15 @@ export function SystemPreview({
     : null
   const source = dropLegacyAutoScope(preset, selected)
   const rendered = previewVars
-    ? previewSystemBlocks(source, previewVars).map((block) => ({
+    ? previewSystemBlocks(source, previewVars, {
+        preserveCallerSystem: preset === 'zero',
+      }).map((block) => ({
         ...block,
-        region: 'system',
+        region:
+          block.id === 'caller_system' &&
+          source.some((template) => template.id === 'caller_system')
+            ? 'messages · 首条 user'
+            : 'system',
       }))
     : []
   const plain = rendered.map((block) => block.text).join('\n\n')

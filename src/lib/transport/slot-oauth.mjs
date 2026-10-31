@@ -1,5 +1,8 @@
 import { spawn } from 'node:child_process'
+import { randomUUID as cryptoRandomUUID } from 'node:crypto'
 import path from 'node:path'
+import { createInterface } from 'node:readline'
+import { postRustKernelTelemetryEvent } from './rust-kernel-client.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
 import { slotExecArgv } from '../vm/slot-exec.mjs'
 
@@ -20,7 +23,7 @@ function failure(code, message = undefined) {
   }
 }
 
-function runDockerProcess(argv, { stdin = '', timeoutMs = 45000, env } = {}) {
+export function runSlotProcess(argv, { stdin = '', timeoutMs = 45000, env, onStdoutLine } = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.env.KIN_DOCKER_BIN || 'docker', argv, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -30,16 +33,34 @@ function runDockerProcess(argv, { stdin = '', timeoutMs = 45000, env } = {}) {
     const stderr = []
     let settled = false
     let timer = null
+    let stdoutBytes = 0
+    let stderrBytes = 0
+    let outputLimit = false
+    if (onStdoutLine) {
+      const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
+      lines.on('line', onStdoutLine)
+    }
+    child.stdin?.on('error', () => {})
 
     const finish = (result) => {
       if (settled) return
       settled = true
-      if (timer) clearTimeout(timer)
+      clearTimeout(timer)
       resolve(result)
     }
 
-    child.stdout?.on('data', (chunk) => stdout.push(chunk))
-    child.stderr?.on('data', (chunk) => stderr.push(chunk))
+    child.stdout?.on('data', (chunk) => {
+      stdoutBytes += chunk.length
+      if (stdoutBytes <= 1024 * 1024) stdout.push(chunk)
+      else {
+        outputLimit = true
+        child.kill('SIGKILL')
+      }
+    })
+    child.stderr?.on('data', (chunk) => {
+      stderrBytes += chunk.length
+      if (stderrBytes <= 65536) stderr.push(chunk)
+    })
     child.once('error', (error) => {
       finish({
         code: null,
@@ -51,6 +72,7 @@ function runDockerProcess(argv, { stdin = '', timeoutMs = 45000, env } = {}) {
     child.once('close', (code) => {
       finish({
         code,
+        output_limit: outputLimit,
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),
         timed_out: false,
@@ -91,7 +113,14 @@ function lastJsonLine(stdout) {
 export async function runSlotOauth(
   exec,
   op,
-  { body, headers, force = false, timeoutMs = 45000, runDocker = runDockerProcess } = {},
+  {
+    body,
+    headers,
+    force = false,
+    timeoutMs = 45000,
+    runDocker = runSlotProcess,
+    postTelemetry = postRustKernelTelemetryEvent,
+  } = {},
 ) {
   if (process.env.KIN_CRS_MOCK === '1') return null
   if (!OPS.has(op)) return failure('worker_op_invalid', `unsupported oauth operation: ${op}`)
@@ -108,25 +137,87 @@ export async function runSlotOauth(
       : op === 'reset-redeem'
         ? JSON.stringify(body || {})
         : ''
+  // Only the unique guest RT writer can prove an attempt happened: cache hits,
+  // waiters and polls emit no notification. Preserve order without blocking stdout.
+  let telemetry = Promise.resolve()
+  let telemetryError = null
+  const attempts = new Map()
+  const onStdoutLine = (line) => {
+    let event
+    try {
+      event = JSON.parse(line)
+    } catch {
+      return
+    }
+    if (
+      event?.type !== 'oauth_attempt' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(event.attempt_id)
+    )
+      return
+    const prior = attempts.get(event.attempt_id)
+    if (event.phase === 'start') {
+      if (prior || attempts.size >= 64) return
+      attempts.set(event.attempt_id, 'start')
+    } else if (event.phase === 'success' || event.phase === 'failure') {
+      if (prior !== 'start') return
+      attempts.set(event.attempt_id, event.phase)
+    } else return
+    const notification = {
+      event_id: cryptoRandomUUID(),
+      kind: 'oauth',
+      attempt_id: event.attempt_id,
+      operation: 'refresh',
+      phase: event.phase,
+      ...(event.phase === 'failure'
+        ? { error_code: /^[a-z][a-z0-9_]{0,63}$/.test(event.error_code) ? event.error_code : 'refresh_failed' }
+        : {}),
+    }
+    telemetry = telemetry.then(async () => {
+      try {
+        const recorded = await postTelemetry(exec, notification, { timeoutMs: 20000 })
+        if (!recorded?.ok) telemetryError = 'oauth_telemetry_unavailable'
+      } catch {
+        telemetryError = 'oauth_telemetry_unavailable'
+      }
+    })
+  }
   let result
   try {
-    result = await runDocker(argv, { stdin, timeoutMs, env: host.dockerEnv() })
+    result = await runDocker(argv, { stdin, timeoutMs, env: host.dockerEnv(), onStdoutLine })
   } catch (error) {
-    return failure('worker_exec_failed', String(error?.message || error).slice(0, 300))
+    result = { execError: String(error?.message || error).slice(0, 300) }
   }
-  if (result?.timed_out) return failure('worker_timeout')
+  for (const [attempt_id, phase] of attempts) {
+    if (phase === 'start')
+      onStdoutLine(
+        JSON.stringify({
+          type: 'oauth_attempt',
+          attempt_id,
+          phase: 'failure',
+          error_code: result?.timed_out ? 'worker_timeout' : 'worker_exec_failed',
+        }),
+      )
+  }
+  await telemetry
+  const failed = (code, message) => ({
+    ...failure(code, message),
+    ...(telemetryError ? { telemetry_error: telemetryError } : {}),
+  })
+  if (result?.execError) return failed('worker_exec_failed', result.execError)
+  if (result?.timed_out) return failed('worker_timeout')
+  if (result?.output_limit) return failed('worker_output_limit')
   // A refresh rotates the RT where the slot keeps its credential; the local mirror must follow before anyone reads it.
   if (op === 'refresh' && exec.homeDir) {
     try {
       await host.afterRefresh(exec.vm, path.dirname(exec.homeDir))
     } catch (error) {
-      return failure('credential_pull_failed', String(error?.message || error).slice(0, 300))
+      return failed('credential_pull_failed', String(error?.message || error).slice(0, 300))
     }
   }
 
   const payload = lastJsonLine(result?.stdout)
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    return failure('worker_output_invalid', String(result?.stderr || '').slice(0, 300))
+    return failed('worker_output_invalid', String(result?.stderr || '').slice(0, 300))
   }
 
   const status = Number.isInteger(payload.status) ? payload.status : Number(payload.status) || 0
@@ -137,6 +228,7 @@ export async function runSlotOauth(
     headers: payload.headers && typeof payload.headers === 'object' ? payload.headers : {},
     via: 'slot-worker',
   }
+  if (telemetryError) response.telemetry_error = telemetryError
   if (status === 0) response.transportError = true
   return response
 }

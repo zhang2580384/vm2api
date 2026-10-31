@@ -6,6 +6,34 @@ import { prepareCliHopBody } from '../../src/lib/protocol/outbound-attempt.mjs'
 
 const MODEL = 'claude-sonnet-5'
 
+test('Chat assistant cache boundaries survive alongside tool calls without mutating input', () => {
+  const control = { type: 'ephemeral', scope: 'global' }
+  const input = {
+    model: MODEL,
+    messages: [
+      { role: 'user', content: 'Hello' },
+      {
+        role: 'assistant',
+        content: [
+          'prefix ',
+          { type: 'output_text', text: '  cached answer\n', annotations: [], cache_control: control },
+        ],
+        tool_calls: [{ id: 'tool_1', type: 'function', function: { name: 'Read', arguments: '{"path":"a"}' } }],
+      },
+      { role: 'tool', tool_call_id: 'tool_1', content: 'done' },
+    ],
+  }
+  const before = structuredClone(input)
+  const out = toClaudeMessages('openai.chat', input).claude
+  assert.deepEqual(out.messages[1].content, [
+    { type: 'text', text: 'prefix ' },
+    { type: 'text', text: '  cached answer\n', cache_control: control },
+    { type: 'tool_use', id: 'tool_1', name: 'Read', input: { path: 'a' } },
+  ])
+  assert.equal(out.messages[2].content[0].tool_use_id, 'tool_1')
+  assert.deepEqual(input, before)
+})
+
 function stampMap(body) {
   const hits = []
   for (const [i, block] of (body.system || []).entries()) {

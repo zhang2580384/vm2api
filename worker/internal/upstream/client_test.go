@@ -26,6 +26,8 @@ func TestAllowedHeaderKeepsCapturedIdentityAndDropsSecrets(t *testing.T) {
 		"User-Agent",
 		"anthropic-beta",
 		"anthropic-dangerous-direct-browser-access",
+		"x-claude-code-agent-id",
+		"x-claude-code-parent-agent-id",
 		"x-claude-code-prompt-id",
 		"x-claude-code-request-class",
 		"x-claude-code-session-id",

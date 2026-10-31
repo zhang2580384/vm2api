@@ -96,7 +96,7 @@ import { effectiveOpenAIPolicy, normalizeOpenAIQuotaPolicy } from '../pool/opena
 import { openAIRuntimeSignals } from '../pool/openai-account-runtime.mjs'
 import { normalizeVmConfig, memoryMiB } from '../vm/machine-spec.mjs'
 import { runtimeKind } from '../vm/runtime-kind.mjs'
-import { telemetryUploadInterval } from '../vm/worker-telemetry.mjs'
+import { telemetryUploadInterval } from '../vm/native-telemetry.mjs'
 
 export function ok(data, meta) {
   const out = { ok: true, data }

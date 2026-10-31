@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { applyEagerToolStreaming } from '../../src/lib/protocol/eager-tool-streaming.mjs'
 import { officialMessagesBody } from '../../src/lib/protocol/anthropic-messages.mjs'
 import { toClaudeMessages } from '../../src/lib/protocol/convert.mjs'
+import { prepareCliHopBody, prepareCliPersonaInput } from '../../src/lib/protocol/outbound-attempt.mjs'
 
 const schema = { type: 'object', properties: {} }
 const body = () => ({
@@ -87,3 +88,26 @@ test('applyEagerToolStreaming marks leftover OpenAI function tools before saniti
   assert.equal(out.tools[0].name, 'Write')
   assert.equal(out.tools[0].eager_input_streaming, true)
 })
+
+for (const preset of ['official_full', 'zero']) {
+  test(`CLI ${preset} preserves eager flags through persona preparation and final assembly`, () => {
+    for (const routing of [on, off]) {
+      const input = body()
+      input.tools[0].cache_control = { type: 'ephemeral', ttl: '1h' }
+      input.tools[2].eager_input_streaming = true
+      const before = structuredClone(input)
+      const prepared = prepareCliPersonaInput(input, preset)
+      const staged = byName(prepared.tools)
+      assert.equal(staged.Edit.eager_input_streaming, false)
+      assert.equal(staged.Bash.eager_input_streaming, true)
+      assert.deepEqual(staged.Write.cache_control, preset === 'zero' ? input.tools[0].cache_control : undefined)
+      const output = prepareCliHopBody(prepared, { routing, personaPreset: preset })
+      const tools = byName(output.tools)
+      assert.equal(tools.Write.eager_input_streaming, routing === on ? true : undefined)
+      assert.equal(tools.Edit.eager_input_streaming, false)
+      assert.equal(tools.Bash.eager_input_streaming, true)
+      assert.equal(tools.web_search.eager_input_streaming, undefined)
+      assert.deepEqual(input, before)
+    }
+  })
+}

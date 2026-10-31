@@ -6,7 +6,7 @@
  *   kin-kernel   slot kernel (prebuilt; ships separately from the Linux payload)
  *   cli-node     wrap dataplane CLI (prebuilt)
  *   cc-node      cc dataplane CLI (prebuilt)
- *   kin-worker   telemetry / oauth sidecar (Go, `GOOS=darwin GOARCH=arm64`)
+ *   kin-worker   OAuth command helper (Go, `GOOS=darwin GOARCH=arm64`)
  *
  * They are read from KIN_DARWIN_PAYLOAD_DIR, default <project>/payload/darwin-arm64.
  * On the node they live in <root>/native/<digest>/: content-addressed, shared by

@@ -40,12 +40,14 @@ func TestEnsureDeduplicatesConcurrentRefresh(t *testing.T) {
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
+	var attempts []Attempt
 	refresher := &Refresher{
-		Store:    store,
-		Client:   upstream.Client(),
-		TokenURL: upstream.URL,
-		Skew:     5 * time.Minute,
-		MaxTries: 1,
+		Store:     store,
+		Client:    upstream.Client(),
+		TokenURL:  upstream.URL,
+		Skew:      5 * time.Minute,
+		MaxTries:  1,
+		OnAttempt: func(attempt Attempt) { attempts = append(attempts, attempt) },
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -65,6 +67,16 @@ func TestEnsureDeduplicatesConcurrentRefresh(t *testing.T) {
 	wg.Wait()
 	if calls.Load() != 1 {
 		t.Fatalf("refresh calls = %d, want 1", calls.Load())
+	}
+	if len(attempts) != 2 || attempts[0].Phase != "start" || attempts[1].Phase != "success" ||
+		attempts[0].AttemptID == "" || attempts[0].AttemptID != attempts[1].AttemptID {
+		t.Fatalf("actual refresh notifications = %#v", attempts)
+	}
+	if _, err := refresher.Ensure(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 2 || calls.Load() != 1 {
+		t.Fatalf("cached credential produced a refresh notification or network request")
 	}
 	current, err := store.Status()
 	if err != nil {

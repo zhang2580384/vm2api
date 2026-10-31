@@ -244,7 +244,7 @@ export function ModelSettings({
         <ToggleList>
           <ToggleItem
             label='决策模型'
-            desc='每题都问是否安全，任一题低于阈值就拦'
+            desc='三题各自打分，任一题低于阈值就拦。色情命中会封设备'
           >
             <Switch
               checked={draft.enabled}

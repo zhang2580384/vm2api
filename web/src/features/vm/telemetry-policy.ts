@@ -24,16 +24,3 @@ export function telemetrySeedFlags(enabled: boolean): TelemetrySeedFlags {
     do_not_track: !enabled,
   }
 }
-
-/**
- * Detail-page status. Configured on/off comes from the seed bit above.
- * `running` stays a process observation and is not a second on/off switch.
- * No seed object: keep the process snapshot (unknown stays unknown).
- */
-export function telemetryView<T extends { enabled?: boolean | null }>(
-  seedPolicy: Record<string, unknown> | null | undefined,
-  observed: T | null | undefined
-): T | { enabled: boolean } | null {
-  if (!seedPolicy || typeof seedPolicy !== 'object') return observed ?? null
-  return { ...(observed || {}), enabled: telemetryEnabled(seedPolicy) }
-}

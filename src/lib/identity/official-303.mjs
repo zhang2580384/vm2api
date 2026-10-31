@@ -227,7 +227,7 @@ export function renderOfficial303Body(
     firstUserText = '',
     sessionId = '',
     oneM = false,
-    entrypoint = 'sdk-cli',
+    entrypoint = 'cli',
   } = {},
 ) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) return body

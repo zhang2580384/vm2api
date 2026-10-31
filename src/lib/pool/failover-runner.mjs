@@ -714,6 +714,7 @@ export class FailoverRunner {
     let lastResult = null
     let lastPolicy = null
     let repaired = false
+    let repairPolicy = null
     // The repaired body is the known fix and has not been sent yet; a slow
     // rejected hop (a 400 can take minutes on a long transcript) must not
     // turn it into the client's error. Bounded: repair is one-shot.
@@ -768,6 +769,7 @@ export class FailoverRunner {
           quotaRequest: {
             body: requestBody,
             sessionId: outboundSessionId || quotaRequest?.sessionId || stickyKey,
+            preserveMessageCache: quotaRequest?.preserveMessageCache,
           },
         }
         if (avoid) {
@@ -838,6 +840,8 @@ export class FailoverRunner {
         model,
         selectionReason: selected.selectionReason,
         waitMs: selected.waitMs,
+        queueWaitMs: selected.queueWaitMs,
+        schedulingMs: selected.schedulingMs,
       })
       let result
       let policy
@@ -860,6 +864,12 @@ export class FailoverRunner {
             ? await applyAttempt(clone(attemptBody), selected, {
                 attemptNo,
                 repaired,
+                // Assemblers may rebuild from caller input for each selected
+                // slot. Replay the same repairs on that freshly rendered body.
+                repairs: [
+                  ...(knownSearchRepair ? [{ action: 'repair-and-retry', reason: 'search_repairable' }] : []),
+                  ...(repairPolicy ? [repairPolicy] : []),
+                ],
                 attemptStartedAt: attemptStarted,
                 freshSlot,
                 stickyBound: attemptStickyBound,
@@ -1009,6 +1019,7 @@ export class FailoverRunner {
         }
         if (policy.action === 'repair-and-retry' && !repaired && !result?.committed) {
           repaired = true
+          repairPolicy = { action: policy.action, reason: policy.reason }
           repairPending = true
           if (policy.reason === 'search_repairable' && repairKey && fingerprint()) {
             searchRepair = { key: repairKey }

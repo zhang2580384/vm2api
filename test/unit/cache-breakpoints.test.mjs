@@ -397,8 +397,9 @@ test('over the four-breakpoint budget, message anchors are kept over system extr
 })
 
 /** The live regression: persona rebuilds system from a template, so a caller's own
-    breakpoint used to vanish and every turn re-created the cache. */
-test('a caller breakpoint on system reaches the wire through the official persona preset', () => {
+    breakpoint used to vanish and every turn re-created the cache. The caller system now
+    rides in the first user turn; the template harness carries the system breakpoint. */
+test('a caller system with a breakpoint still leaves a cacheable system prefix through the official persona preset', () => {
   const compat = { persona_preset: 'official', overlay_preset: 'off' }
   withRoutingFile(compat, (routingFile) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-bp-home-'))
@@ -416,10 +417,13 @@ test('a caller breakpoint on system reaches the wire through the official person
       model: inbound.model,
     })
     const personaHits = breakpoints(persona)
-    assert.ok(personaHits.length >= 1, 'official persona must keep a cache boundary on the agent prefix')
     assert.ok(
-      personaHits.some((h) => h.where.startsWith('system[') && h.ttl === '1h'),
-      'agent slot carries 1h global cache instead of dropping caller breakpoints',
+      personaHits.some((h) => h.where.startsWith('system[') && h.scope === 'global'),
+      'the 303 harness block carries the global system breakpoint',
+    )
+    assert.equal(
+      persona.messages[0].content,
+      '<system-reminder>\nYou are our internal docs bot.\n</system-reminder>\nhi',
     )
     const envelope = prepareOutboundEnvelope({
       canonicalBody: persona,

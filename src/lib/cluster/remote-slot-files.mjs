@@ -33,18 +33,20 @@ import {
   writeRemoteFile,
 } from './remote-fs.mjs'
 
+const SEED_SETTINGS_FILES = Object.freeze([
+  'cli-home/.claude/settings.json',
+  'cli-home/.claude/claude.setting',
+  'cli-home/.claude/kin-seed.json',
+])
+
 export const SLOT_FILE_SETS = Object.freeze({
   run: ['run/kernel.json', 'run/worker.json', 'run/internal.token'],
-  seed: [
-    'cli-home/.claude/settings.json',
-    'cli-home/.claude/claude.setting',
-    'cli-home/.claude/kin-seed.json',
-    'machine-id',
-  ],
-  touch: ['run/telemetry.touch'],
+  seed: [...SEED_SETTINGS_FILES, 'machine-id'],
+  // Policy publication must not overwrite node-owned identity or OAuth files.
+  seed_settings: SEED_SETTINGS_FILES,
+  telemetry: ['run/kernel.json', ...SEED_SETTINGS_FILES, 'cli-home/.claude/telemetry/egress.json'],
 })
 const CREDENTIALS = 'cli-home/.claude/credentials.json'
-const TOUCH_PUSH_MS = 30_000
 const SLOT_BINARIES = Object.freeze(['kin-worker', 'kin-egress'])
 
 function clusterBin(envKey, fallback) {
@@ -70,7 +72,7 @@ async function prepareRemoteDir(session, vm) {
   const dir = remoteSlotDir(session.host, vm.id)
   const owner = remoteSlotOwner(session.host, vm)
   // Mount roots only: nothing here resolves through a path the guest can rewrite.
-  const roots = [`${dir}/run`, `${dir}/claude`, `${dir}/cli-home`].map(shellQuote).join(' ')
+  const roots = [`${dir}/run`, `${dir}/claude`, `${dir}/claude/telemetry`, `${dir}/cli-home`].map(shellQuote).join(' ')
   const binDir = shellQuote(`${dir}/slot-bin`)
   // Docker creates a missing bind source as root:root, which the slot uid cannot write.
   const chown =
@@ -91,7 +93,7 @@ function ownerFor(session, vm) {
   return session.host.uid === 0 ? remoteSlotOwner(session.host, vm) : null
 }
 
-/** Push the named sets (`run`, `seed`, `touch`). Missing local files are skipped. */
+/** Push the named sets (`run`, `seed`). Missing local files are skipped. */
 export async function pushSlotFiles(vm, slotDir, sets = ['run', 'seed'], session = null) {
   const s = session || (await nodeSession(vmNodeId(vm)))
   await prepareRemoteDir(s, vm)
@@ -104,7 +106,8 @@ export async function pushSlotFiles(vm, slotDir, sets = ['run', 'seed'], session
     let data
     try {
       data = fs.readFileSync(local)
-    } catch {
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
       continue
     }
     // Never mirror local modes: a drvfs / 0777 checkout would publish tokens world-readable on the node.
@@ -235,16 +238,6 @@ export function queueSlotPush(vm, slotDir, sets, { logger = console } = {}) {
     })
   queues.set(vm.id, next)
   return next
-}
-
-const touchedAt = new Map()
-
-/** Telemetry idle detection reads telemetry.touch in the slot; once per 30s is enough there. */
-export function pushTelemetryTouch(vm, slotDir, now = Date.now()) {
-  const last = touchedAt.get(vm.id) || 0
-  if (now - last < TOUCH_PUSH_MS) return null
-  touchedAt.set(vm.id, now)
-  return queueSlotPush(vm, slotDir, ['touch'])
 }
 
 /** Delete the node-side slot tree (explicit delete / factory reset only). */

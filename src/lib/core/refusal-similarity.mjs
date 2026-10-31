@@ -78,25 +78,43 @@ function userTexts(body, includeToolResults = true) {
   out.push(...responsesInputTexts(body.input, includeToolResults))
   return out
 }
+/** Raw user turns, tool payloads omitted, repeats dropped. Not normalized. */
+export function refusalAskTurns(inbound, body = inbound) {
+  const seen = new Set()
+  const turns = []
+  for (const src of [inbound, body]) {
+    for (const raw of userTexts(src, false)) {
+      const key = normalizeText(raw)
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      turns.push(raw)
+    }
+  }
+  return turns
+}
 
 /**
  * User turns from inbound, then body, with exact repeats dropped.
  * Hard regex passes includeToolResults: false. Tool payloads quote the rules
- * (issue text, command output) and are not the user's ask. Refusal similarity
- * still sees them.
+ * (issue text, command output) and are not the user's ask.
+ * `clean` drops closed reminders and `# Environment` before comparison.
+ * The current ask is repeated at the end so a long history cannot hide it.
  */
 export function refusalUserDocument(inbound, body = inbound, options = {}) {
   const includeToolResults = options.includeToolResults !== false
+  const clean = typeof options.clean === 'function' ? options.clean : null
   const seen = new Set()
   const parts = []
   for (const src of [inbound, body]) {
-    for (const text of userTexts(src, includeToolResults)) {
+    for (const raw of userTexts(src, includeToolResults)) {
+      const text = clean ? clean(raw) : raw
       const norm = normalizeText(text)
       if (!norm || seen.has(norm)) continue
       seen.add(norm)
       parts.push(norm)
     }
   }
+  if (clean && parts.length > 1) parts.push(parts[parts.length - 1])
   return parts.join('\n')
 }
 

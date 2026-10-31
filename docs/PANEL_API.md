@@ -346,7 +346,7 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 
 三个后端走同一套 `/v1/systemone`。题库存在 `questions`：可增删改，缺省是内置六题（综合、色情、破限、逆向、渗透、网络攻击）。每题都是「是否安全」，高分表示安全，启用的题目一起问，任一题低于阈值就拦。`safety_instruction` 非空时再多问一题自定义要求。`POST /jev-intercept/models` 用地址和 Key（留空则用已存的第一把）请求 `{base}/v1/models`，失败回 502，不会把上游 401 当成面板登出。
 
-内置正则覆盖 NSFW、蒸馏、破解、破限，面板删不掉。比较的是用户自己写下的正文，不含 user 轮里的 `tool_result` / `*_tool_result` / `function_call_output`；决策模型仍看 system。命中硬正则或模型返回 HTTP 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device id。模型不可用且 `fail_open` 为 false 时同样 403，不封设备。上游 `content_policy` / `content_filter` / `cyber_policy` / `moderation_blocked` / `safety_violation` / `usage_policy` 同样入库。仅 admin。
+内置正则覆盖 NSFW、蒸馏、破解、破限，面板删不掉。比较的是用户自己写下的正文，不含 user 轮里的 `tool_result` / `*_tool_result` / `function_call_output`，也不含 `system`、`instructions`、`# Environment` 和已闭合的 `<system-reminder>`。决策模型只看这些用户正文；多轮时当前用户句再附在末尾。命中硬正则或模型返回 HTTP 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device id。模型不可用且 `fail_open` 为 false 时同样 403，不封设备。上游 `content_policy` / `content_filter` / `cyber_policy` / `moderation_blocked` / `safety_violation` / `usage_policy` 同样入库。仅 admin。
 
 账号范围（`account_platform_plans[]`、`account_ids[]`，都可为空）把关卡收窄到部分槽位。每一项是 `平台:套餐`，例如 `claude:max`、`gpt:plus`、`gpt:business`；`none` 是没标注套餐。Claude 的 Max/Pro 与虚拟机列表相同（usage 里有 Fable 就是 Max，盖过落盘的 Pro）。指定账号收槽位 id、邮箱或名称，和勾选取并集，全空 = 所有账号都进关卡。只选了 GPT 套餐时 Claude 仍全部进关卡；选了 Claude 套餐或指定账号后，Claude 在选中槽位后再判，没命中的放行。GPT 一旦有范围就只由范围决定，没有范围时仍看 `openai_platform_enabled`。`GET` / `PUT` 都回 `account_scope.account_platform_plan_options`（带当前槽位数）和槽位清单（每条有 `scope_key`）。旧的 `account_types` 不再参与判断；只写过 `account_plan_types`、还没有 `account_platform_plans` 的配置会收成对应的 GPT 套餐（`none` 同时包含两边的未标注）。
 
@@ -366,6 +366,19 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 创建密钥只在响应里明文出现一次。存储为 HMAC 索引。`group_type` 为 `all`（默认，全局可调度）、`anthropic` 或 `openai`。后两个必须带 `allowed_vms`（该平台的 VM id，可多台）。`vm_pool_id` 绑定命名账号池：成员以池为准，不复制到密钥；`allowed_vms` 被清空。池停用、为空或不存在时请求返回 403 `vm_pool_unavailable`，不回落到全局池。改成员或解除绑定对下一次请求生效，包括已有粘性会话。一台槽只属于一个池。缺字段的旧密钥视为 `all`。`GET /api-keys/:id/stats` 是该密钥近 30 天用量：上海日桶、模型分布、VM 分布。不是 VM 的上游额度窗口。
 
 attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终态。`normal` 摘要；`debug` 另存入站原文及脱敏出站数据。`outbound_body` 仍为最后一次真正 POST 给 worker 的 envelope body，Node → worker 的头为 `worker_envelope_headers`。`outbound_headers_source=cli_final` 表示 `outbound_headers` 来自 cli-node 完成组装、CCH 和长度处理后的最终 fetch 调用边界；不包含底层补的 Host / HTTP/2 伪头，凭证及未知自定义头值已在 CLI 脱敏。每次重试覆盖，最后一次尝试未回传则 source=`unavailable`、headers=null，绝不以 envelope 代替。旧记录没有 source，原值不能视作最终值。最终 HTTP body 字节仍不在日志里。该功能需升级 Node、web 与 cli-node，旧 CLI 不支持回传。`X-Request-ID` 回写。`X-Kin-Debug` / `X-Kin-Log` 可单请求覆盖，但出站数据仅按管理员配置的 debug 采样保存。
+
+日志性能（`GET /usage-logs` 为 camelCase，`/request-logs` 与导出为 snake_case）：
+
+| 字段 | 定义 |
+|------|------|
+| `ttftMs` / `first_token_ms` | 请求入口到首个实际生成内容/进度；text、thinking、工具名称/参数均可触发，不把 `message_start`、空块或生命周期元数据当 token。 |
+| `firstByteMs` / `first_byte_ms` | 请求入口到首个上游协议事件的接收时间；独立于 TTFT。内部诊断帧不计。 |
+| `generationMs` / `generation_ms` | 首个上游协议事件到终止生成事件的实测窗口：Claude `message_delta.stop_reason`（缺失时 `message_stop`）、OpenAI `response.completed` / `response.done` / `response.incomplete`；不含随后 HTTP EOF、trailer 与收尾。 |
+| 输出速率 | `outputTokens × 1000 / generationMs`。输出 token 包含推理，窗口也包含不可见推理；不是 `output / (总耗时 − TTFT)`。 |
+| `cacheCreationInputTokens` / `cache_creation_tokens` | 上游明确报告的缓存写入量；未报告时 `null`，明确 0 保留 0。不从未缓存输入、缓存未命中或 `input − cached` 推算。 |
+
+以上是网关观测的流式时序，不是上游模型内部逐 token 的计算时间。迁移 043 之前的记录没有实测输出窗口；同一接收批次内完成、未收到生成内容/进度或流未正常终结时，速率不可测，页面不显示估算 tok/s。详情「总令牌数」=`inputTokens + outputTokens + cacheReadInputTokens + (cacheCreationInputTokens ?? 0)`，输入为不含缓存的互斥口径。OpenAI `reasoning_tokens` 已在 output 内，不能再累加。升级需同时更新 Node / web 和重新构建的 API 内核（SSE flush），无需更新 native CLI payload；历史写入 0 不自动改写为未知。
+
 
 ### 账号池
 

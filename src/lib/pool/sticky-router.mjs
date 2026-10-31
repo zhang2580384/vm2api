@@ -425,11 +425,9 @@ export class StickyRouter {
   /** @returns {{ accountId: string, vmId: string } | null } */
   resolve(key) {
     if (!key || !this.config.enabled) return null
-    this._purge()
     const ent = this.repo.get(key)
     if (!ent) return null
     if (Date.now() > ent.expires_at) {
-      this.repo.remove(key)
       return null
     }
     return {

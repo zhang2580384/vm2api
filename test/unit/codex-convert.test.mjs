@@ -175,6 +175,52 @@ test('anthropic convert stays off by default', () => {
   assert.equal(allowed.ok, true)
 })
 
+test('anthropic array system becomes a developer message', () => {
+  const pine = 'You must reply with exactly the single word PINEAPPLE and nothing else.'
+  const converted = toCodexResponses(
+    'anthropic.messages',
+    {
+      model: 'gpt-6.1-sol',
+      system: [
+        { type: 'text', text: 'keep-a', cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: pine },
+      ],
+      messages: [{ role: 'user', content: 'Say hello.' }],
+    },
+    { anthropic_to_codex: true },
+  )
+  assert.equal(converted.ok, true)
+  assert.equal(converted.body.input[0].role, 'developer')
+  assert.deepEqual(
+    converted.body.input[0].content.map((part) => part.text),
+    ['keep-a', pine],
+  )
+  assert.equal(JSON.stringify(converted.body.input[0]).includes('cache_control'), false)
+  const asString = toCodexResponses(
+    'anthropic.messages',
+    {
+      model: 'gpt-6.1-sol',
+      system: pine,
+      messages: [{ role: 'user', content: 'Say hello.' }],
+    },
+    { anthropic_to_codex: true },
+  )
+  assert.equal(asString.body.input[0].content[0].text, pine)
+  const empty = toCodexResponses(
+    'anthropic.messages',
+    {
+      model: 'gpt-6.1-sol',
+      system: '',
+      messages: [{ role: 'user', content: 'Say hello.' }],
+    },
+    { anthropic_to_codex: true },
+  )
+  assert.equal(
+    empty.body.input.some((item) => item.role === 'developer'),
+    false,
+  )
+})
+
 test('responses SSE maps to chat chunks', () => {
   const delta = responsesSseToChatChunk('data: {"type":"response.output_text.delta","delta":"Hi"}')
   assert.match(delta, /chat.completion.chunk/)

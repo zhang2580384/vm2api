@@ -15,6 +15,7 @@ import {
 import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
 import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
 import { gateVerdict } from '../../src/lib/protocol/intercept-stats.mjs'
+import { UsageLogsView } from '../../src/lib/db/repos/usage-logs-view.mjs'
 
 function tmpStore(mode = 'normal') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-rlog-'))
@@ -111,6 +112,33 @@ test('summary persists protocol usage detail (cache/model/ttft/stop_reason)', ()
   assert.equal(row.upstream_model, 'claude-sonnet-5')
   assert.equal(row.stop_reason, 'end_turn')
   assert.equal(row.total_cost, 0.0000926)
+})
+
+test('OpenAI log totals count cached input once and distinguish unknown from zero cache writes', (t) => {
+  const store = tmpStore('normal')
+  t.after(() => {
+    store.db.close()
+    fs.rmSync(store.dataDir, { recursive: true, force: true })
+  })
+  for (const cacheWrite of [undefined, 0, 20]) {
+    const ctx = store.start(
+      { method: 'POST', headers: {}, socket: {} },
+      { protocol: 'openai.responses', pathName: '/v1/responses' },
+    )
+    store.finish(ctx, {
+      status: 200,
+      model: 'gpt-5.4',
+      usage: {
+        input_tokens: 1000,
+        output_tokens: 50,
+        input_tokens_details: { cached_tokens: 800, ...(cacheWrite == null ? {} : { cache_write_tokens: cacheWrite }) },
+      },
+    })
+    const row = new UsageLogsView(store.db).listBatch({ limit: 10 }).logs.find((r) => r.requestId === ctx.request_id)
+    assert.equal(row.inputTokens, 200 - (cacheWrite ?? 0))
+    assert.equal(row.totalTokens, 1050)
+    assert.equal(row.cacheCreationInputTokens, cacheWrite ?? null)
+  }
 })
 
 test('backfillMissingCosts restores actual cost with the stored group multiplier', () => {
@@ -698,6 +726,22 @@ test('summaries persist in sqlite across store re-open', () => {
   assert.equal(listed.length, 1)
   assert.equal(listed[0].api_key_id, 'key_p')
   assert.equal(s2.snapshot().total_rows, 1)
+})
+test('a jev block keeps the posted state beside the category', () => {
+  const store = tmpStore()
+  const state = '[current ask]\n[user message 4]\n请只改测试。'
+  const row = logOne(store, {
+    status: 403,
+    via: 'jev',
+    final_state: 'policy_blocked',
+    error_code: 'policy_blocked',
+    intercept: gateVerdict({ kind: 'block', by: 'jev', keyword: 'jailbreak' }),
+    jev_state: state,
+  })
+  assert.equal(JSON.parse(row.intercept).keyword, 'jailbreak')
+  assert.equal(row.jev_state, state)
+  const again = new RequestLogStore({ dataDir: store.dataDir, mode: 'normal' })
+  assert.equal(again.listNormal({ limit: 1 })[0].jev_state, state)
 })
 
 test('gate stats count every inbound request and keep the stored verdict', () => {

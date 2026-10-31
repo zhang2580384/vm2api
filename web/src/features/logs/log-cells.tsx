@@ -62,8 +62,8 @@ export function ThinkingEffortBadge({ effort }: { effort: string }) {
 }
 
 /**
- * 思考强度。vm2api 只记录客户端请求值（无供应商覆写审计），
- * 因此没有 hub 的「请求 → 实际」箭头。
+ * 思考强度。出站 envelope 上的等级：调用方写了就用调用方的，
+ * 否则是模型缺省（面板 default_effort，没有则目录缺省）。off 不显示。
  */
 export function ThinkingEffortDisplay({ effort }: { effort: string | null }) {
   if (!effort) return <span className='text-muted-foreground'>-</span>
@@ -79,8 +79,8 @@ export function ThinkingEffortDisplay({ effort }: { effort: string | null }) {
       </TooltipTrigger>
       <TooltipContent className='max-w-xs space-y-1'>
         <p className='text-xs'>
-          客户端请求中声明的思考强度（reasoning.effort / output_config.effort /
-          thinking budget），按归一后的等级显示。
+          实际发往槽位的思考强度。调用方带了 effort
+          用调用方的；没带则显示模型缺省。不补（off）为空。
         </p>
       </TooltipContent>
     </Tooltip>

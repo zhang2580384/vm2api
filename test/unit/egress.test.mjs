@@ -605,8 +605,9 @@ test('egress config carries dns_upstream only when configured', async () => {
   const base = {
     projectRoot: root,
     proxyUrl: 'socks5h://127.0.0.1:1',
-    tcpPort: 20000,
-    dnsPort: 20001,
+    // /bin/true never listens; fixed ports would wait for a listener that cannot appear.
+    tcpPort: 0,
+    dnsPort: 0,
     listenHost: '127.0.0.1',
     bin: '/bin/true',
   }

@@ -3,19 +3,35 @@ import { cn } from '@/lib/utils'
 import { latencySegments, segmentWidth } from '../log-display'
 
 /**
- * 延迟分解条（hub `LatencyBreakdownBar`）。三段：排队等待（首次尝试的
- * `wait_ms`，替代 vm2api 没有的 TTFB）→ 等待首 Token → 生成。
+ * 延迟分解条：排队 → 上游响应等待 → 首 Token 等待 → 内容输出 → 收尾。
+ * 生成段来自实测 generationMs，不把收尾算进生成。
  */
 export function LatencyBreakdownBar({
   waitMs,
+  queueWaitMs,
+  schedulingMs,
+  firstByteMs,
   ttftMs,
+  generationMs,
   durationMs,
 }: {
   waitMs: number | null
+  queueWaitMs: number | null
+  schedulingMs: number | null
+  firstByteMs: number | null
   ttftMs: number | null
+  generationMs: number | null
   durationMs: number | null
 }) {
-  const segments = latencySegments({ waitMs, ttftMs, durationMs })
+  const segments = latencySegments({
+    waitMs,
+    queueWaitMs,
+    schedulingMs,
+    firstByteMs,
+    ttftMs,
+    generationMs,
+    durationMs,
+  })
   if (!segments || durationMs == null) return null
   const visible = segments.filter((s) => s.ms > 0)
   return (

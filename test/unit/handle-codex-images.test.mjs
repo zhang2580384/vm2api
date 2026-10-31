@@ -308,7 +308,11 @@ test('the images route picks slots by the key owner role, like search', async ()
   const file = path.join(root, 'vms', 'vm-tenant.json')
   fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), owner_user_id: 'u1' }))
   const roles = { a1: 'admin', u1: 'user' }
-  const apiKeyStore = { users: { getById: (id) => ({ id, role: roles[id] }) } }
+  const apiKeyStore = {
+    users: { getById: (id) => ({ id, role: roles[id] }) },
+    acquire: () => ({ ok: true }),
+    release() {},
+  }
   const run = async (userId) => {
     const rows = []
     const { handleImages } = protocolHarness(rows, { apiKeyStore })

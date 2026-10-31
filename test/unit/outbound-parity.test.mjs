@@ -301,3 +301,92 @@ test('resolveCrsHeaders unofficial never leaks caller UA', () => {
   assert.match(leaked['user-agent'], /^claude-cli\//)
   fs.rmSync(dir, { recursive: true, force: true })
 })
+
+test('disabled tool-name rewrite still makes duplicate and illegal names unique', () => {
+  const out = prepareOutboundAttempt({
+    canonicalBody: {
+      model: 'claude-opus-4-8',
+      max_tokens: 32,
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [
+        { name: 'odoo_import_excel', input_schema: { type: 'object' } },
+        { name: 'odoo_import_excel', input_schema: { type: 'object' } },
+        { name: 'mcp.server/read file', input_schema: { type: 'object' } },
+      ],
+    },
+    identity: {},
+    unofficial: true,
+    officialClient: false,
+    toolNameRewrite: false,
+  })
+  const names = out.body.tools.map((tool) => tool.name)
+  assert.equal(names[0], 'odoo_import_excel')
+  assert.match(names[1], /^kin_tool_/)
+  assert.match(names[2], /^kin_tool_/)
+  assert.equal(new Set(names).size, names.length)
+  assert.equal(out.toolNames[names[1]], 'odoo_import_excel')
+  assert.equal(out.toolNames[names[2]], 'mcp.server/read file')
+})
+
+test('identical server tools are deduped and conflicting names are rejected locally', () => {
+  const base = {
+    model: 'claude-opus-4-8',
+    max_tokens: 32,
+    messages: [{ role: 'user', content: 'hi' }],
+  }
+  const out = prepareOutboundAttempt({
+    canonicalBody: {
+      ...base,
+      tools: [
+        { type: 'web_search_20250305', name: 'web_search', max_uses: 8 },
+        { type: 'web_search_20250305', name: 'web_search', max_uses: 8 },
+      ],
+    },
+    identity: {},
+    unofficial: true,
+    officialClient: false,
+  })
+  assert.equal(out.body.tools.filter((tool) => tool.name === 'web_search').length, 1)
+  assert.throws(
+    () =>
+      prepareOutboundAttempt({
+        canonicalBody: {
+          ...base,
+          tools: [
+            { type: 'web_search_20250305', name: 'web_search', max_uses: 4 },
+            { type: 'web_search_20250305', name: 'web_search', max_uses: 8 },
+          ],
+        },
+        identity: {},
+        unofficial: true,
+        officialClient: false,
+      }),
+    (error) => error.status === 400 && error.body.error.code === 'invalid_tool_name',
+  )
+  assert.throws(
+    () =>
+      prepareOutboundAttempt({
+        canonicalBody: {
+          ...base,
+          tools: [
+            { type: 'web_search_20250305', name: 'web_search' },
+            { type: 'web_search_20260209', name: 'web_search' },
+          ],
+        },
+        identity: {},
+        unofficial: true,
+        officialClient: false,
+      }),
+    (error) => error.status === 400 && error.body.error.code === 'invalid_tool_name',
+  )
+  assert.throws(
+    () =>
+      prepareOutboundAttempt({
+        canonicalBody: { ...base, tools: [{ type: 'computer_20250124', name: 'bad name' }] },
+        identity: {},
+        unofficial: true,
+        officialClient: false,
+      }),
+    (error) => error.status === 400 && error.body.error.code === 'invalid_tool_name',
+  )
+})

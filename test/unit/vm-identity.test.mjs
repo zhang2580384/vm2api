@@ -12,7 +12,7 @@ import {
   OFFICIAL_CLI_VERSION,
 } from '../../src/lib/identity/vm-identity.mjs'
 import { applyCrsIdentityReplace } from '../../src/lib/identity/identity-rewrite.mjs'
-import { REQUIRED_SEED_ENV, applyRequiredSeedEnv, buildSeedSettingsEnv } from '../../src/lib/protocol/seed-policy.mjs'
+import { TELEMETRY_KILL_ENV, applyRequiredSeedEnv, buildSeedSettingsEnv } from '../../src/lib/protocol/seed-policy.mjs'
 
 test('metadata.user_id is official JSON for current CLI', () => {
   const s = formatMetadataUserId({
@@ -100,7 +100,7 @@ test('telemetry off writes kill-switch keys; telemetry on deletes them', () => {
   })
   assert.equal(open.DO_NOT_TRACK, undefined)
   assert.equal(open.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1')
-  for (const k of Object.keys(REQUIRED_SEED_ENV)) assert.equal(open[k], undefined)
+  for (const k of Object.keys(TELEMETRY_KILL_ENV)) assert.equal(open[k], undefined)
   const id = loadVmIdentity({
     vmId: 'vm-1',
     homeDir: '/tmp/does-not-exist-kin',

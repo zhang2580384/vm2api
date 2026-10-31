@@ -1,12 +1,12 @@
 {
   "repo": "dofastted/vm2api",
-  "release": "payload-2026.10.26-cli-effort",
+  "release": "payload-2026.10.29-telemetry-kernel",
   "files": [
     {
       "path": "bin/kin-kernel",
       "asset": "kin-kernel",
-      "size": 12892440,
-      "sha256": "8f1347ccffa6ac66d2a6625fded59ea2b9d46c3499f4f192d77cc0510a636a68"
+      "size": 13228472,
+      "sha256": "f57d4e71081bbca0b5bc2ba15886a7149c3e34c256a890ec51e084a9fcd14288"
     },
     {
       "path": "bin/kin-codex-kernel",
@@ -47,8 +47,8 @@
     {
       "path": "share/wrap-cli/cli-node",
       "asset": "cli-node",
-      "size": 27789508,
-      "sha256": "f29bbfa45b68308367f4091699cbeb3a0baba860d327d349d6d55cc11408fb68"
+      "size": 27933052,
+      "sha256": "8484c4c58f4b7782a190f7cab7c8aa5d1f706ae26b2d2a5cafe81af070f0611b"
     },
     {
       "path": "share/wrap-cli/cc-node",
@@ -59,8 +59,8 @@
     {
       "path": "share/wrap-cli/kin-kernel.bin",
       "asset": "kin-kernel",
-      "size": 12892440,
-      "sha256": "8f1347ccffa6ac66d2a6625fded59ea2b9d46c3499f4f192d77cc0510a636a68"
+      "size": 13228472,
+      "sha256": "f57d4e71081bbca0b5bc2ba15886a7149c3e34c256a890ec51e084a9fcd14288"
     },
     {
       "path": "share/wrap-cli/glibc239/ld-linux-x86-64.so.2",

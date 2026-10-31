@@ -136,37 +136,6 @@ test('watchdog does not restart a live crag slot', async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('telemetry sidecar is checked once per window on every running slot', async () => {
-  let now = 0
-  const checked = []
-  const wd = createKernelWatchdog({
-    observeRuntime: async () => ({ state: 'running' }),
-    now: () => now,
-    telemetryEveryMs: 600_000,
-    listTargets: () => [
-      // Inherited rust slots (no inference_engine) are now restart targets too;
-      // telemetry still runs on every running slot, not only those.
-      { id: 'vm-live', status: 'running', runtime: { type: 'docker', worker: 'rust' } },
-      { id: 'vm-stopped', status: 'stopped' },
-      { id: 'vm-kvm', runtime_kind: 'kvm' },
-    ],
-    homeDirFor: (vm) => `/tmp/${vm.id}`,
-    health: async () => null,
-    ensure: async () => ({ ok: true }),
-    ensureTelemetry: async (vm) => {
-      checked.push(vm.id)
-      return { ok: true, action: 'started' }
-    },
-  })
-  await wd.tick()
-  now = 599_999
-  await wd.tick()
-  assert.deepEqual(checked, ['vm-live', 'vm-kvm'])
-  now = 600_000
-  await wd.tick()
-  assert.deepEqual(checked, ['vm-live', 'vm-kvm', 'vm-live', 'vm-kvm'])
-})
-
 test('inherited rust slot reaches the restart ladder after CLI budget is spent', async () => {
   const ensured = []
   const faults = []

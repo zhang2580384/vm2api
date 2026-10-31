@@ -4,8 +4,8 @@
  * and the token exchange. The host only extracts the URL, feeds the pasted
  * code, and reads the full OAuth grant the CLI wrote.
  *
- * This is not `claude setup-token` and not the host-side kin-oauth-auth
- * exchange. Cookie import and setup-token stay on their own paths.
+ * This is not `claude setup-token` or the separate kin-oauth-auth helper.
+ * Cookie import and setup-token stay on their own paths.
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -22,6 +22,8 @@ import { getVm } from '../vm/vm-registry.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
 import { FULL_OAUTH_SCOPE } from './oauth-contract.mjs'
 import { flattenOauthIdentity } from './oauth-identity.mjs'
+import { prepareSlotOAuth } from './guest-oauth-helper.mjs'
+import { slotExec } from '../vm/slot-runtime.mjs'
 
 export const AUTH_LOGIN_SESSION_TTL_MS = 30 * 60 * 1000
 export const AUTH_LOGIN_SOURCE = 'claude-auth-login'
@@ -209,6 +211,7 @@ function loginEnv(vm) {
     'HOME=/home/kincli',
     'TMPDIR=/home/kincli/.cache/tmp',
     'CLAUDE_CONFIG_DIR=/home/kincli/.claude',
+    'KERNEL_CONFIG=/run/kin/kernel.json',
     `TZ=${tz}`,
     `LANG=${locale}`,
     `LC_ALL=${locale}`,
@@ -234,11 +237,22 @@ function loginEnv(vm) {
   ]
 }
 
-export async function startClaudeAuthLoginSession({ vm, projectRoot, force = false, inspect = inspectContainer } = {}) {
+export async function startClaudeAuthLoginSession({
+  vm,
+  projectRoot,
+  routing,
+  force = false,
+  inspect = inspectContainer,
+  prepare = prepareSlotOAuth,
+} = {}) {
   const vmId = vm?.id
   if (!vmId || !projectRoot) throw fail('vm_required', 'vm_id required')
-  await assertAuthLoginReady(projectRoot, vm, { inspect })
   const fake = process.env.KIN_FAKE_SESSION_OAUTH === '1' || process.env.KIN_FAKE_SESSION_OAUTH === 'true'
+  if (!fake) {
+    const prepared = await prepare({ exec: slotExec(projectRoot, vm), projectRoot, routing })
+    vm = prepared.exec.vm
+  }
+  await assertAuthLoginReady(projectRoot, vm, { inspect })
   if (fake) {
     return {
       session_id: 'fake-auth-login',
@@ -267,10 +281,13 @@ export async function startClaudeAuthLoginSession({ vm, projectRoot, force = fal
   const sessionId = crypto.randomBytes(16).toString('hex')
   const createdAt = Date.now()
   const expiresAt = createdAt + AUTH_LOGIN_SESSION_TTL_MS
-  const ids = officialCcUidGid(vmId)
+  const host = slotHost(vm)
+  const user = host.execUser(vm)
+  const [uid, gid] = user.split(':')
+  const dockerEnv = host.dockerEnv()
   const ptyScript = path.join(scriptsDir(), 'claude-auth-login-pty.py')
-  const execArgv = slotExecArgv(vm, [CONTAINER_CLI_NODE_BIN, 'auth', 'login'], {
-    user: `${ids.uid}:${ids.gid}`,
+  const execArgv = slotExecArgv(vm, [host.bins.cli, 'auth', 'login'], {
+    user,
     env: loginEnv(vm),
     workdir: '/home/kincli',
     interactive: true,
@@ -278,6 +295,7 @@ export async function startClaudeAuthLoginSession({ vm, projectRoot, force = fal
   })
   const child = spawn('python3', [ptyScript], {
     env: {
+      ...(dockerEnv?.DOCKER_HOST ? { DOCKER_HOST: dockerEnv.DOCKER_HOST } : {}),
       PATH: process.env.PATH || '/usr/bin:/bin',
       HOME: process.env.HOME || '/root',
       LANG: vm.locale || vm.fingerprint?.locale || 'en_US.UTF-8',
@@ -285,10 +303,9 @@ export async function startClaudeAuthLoginSession({ vm, projectRoot, force = fal
       TZ: vm.timezone || vm.fingerprint?.timezone || 'UTC',
       TERM: 'xterm-256color',
       KIN_CONTAINER: containerName(vmId),
-      KIN_UID: String(ids.uid),
-      KIN_GID: String(ids.gid),
-      KIN_CLI_BIN: CONTAINER_CLI_NODE_BIN,
-      KIN_CLI_VERSION: OFFICIAL_CLI_VERSION,
+      KIN_UID: uid,
+      KIN_GID: gid,
+      KIN_CLI_BIN: host.bins.cli,
       KIN_SESSION_DIR: dir,
       KIN_CREDENTIAL_FILE: path.join(officialCcHome(projectRoot, vmId), '.claude', '.credentials.json'),
       KIN_SESSION_ID: sessionId,
@@ -297,6 +314,17 @@ export async function startClaudeAuthLoginSession({ vm, projectRoot, force = fal
       KIN_EXPIRES_AT: String(expiresAt),
       KIN_SESSION_TTL_MS: String(AUTH_LOGIN_SESSION_TTL_MS),
       KIN_DOCKER_ARGV: JSON.stringify(execArgv),
+      KIN_CREDENTIAL_ARGV: JSON.stringify(
+        slotExecArgv(
+          vm,
+          [
+            'sh',
+            '-c',
+            'f=/home/kincli/.claude/credentials.json; [ -f "$f" ] && [ ! -L "$f" ] && dd if="$f" iflag=nofollow,nonblock bs=65536 count=16 status=none',
+          ],
+          { user },
+        ),
+      ),
     },
     detached: true,
     stdio: 'ignore',

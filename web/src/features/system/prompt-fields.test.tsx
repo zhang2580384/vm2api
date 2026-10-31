@@ -44,6 +44,10 @@ describe('prompt fields', () => {
     expect(html).toContain('核心提示词详情')
     expect(html).toContain('行为指引详情')
     expect(html).toContain('调用方提示词详情')
+    expect(html).toContain(
+      'You are Claude Code, Anthropic&#x27;s official CLI for Claude.'
+    )
+    expect(html).not.toContain('Claude Agent SDK')
     expect(html).not.toContain('303')
     expect(html).not.toContain('{{')
     expect(html).not.toContain('<textarea')

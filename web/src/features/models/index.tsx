@@ -192,6 +192,19 @@ export function ModelsPage() {
         rec.params.on_adaptive = String(value)
         return
       }
+      if (key === 'default_effort') {
+        const effort = String(value)
+        rec.params.default_effort =
+          effort === 'off' ||
+          effort === 'low' ||
+          effort === 'medium' ||
+          effort === 'high' ||
+          effort === 'xhigh' ||
+          effort === 'max'
+            ? effort
+            : ''
+        return
+      }
       rec.params[key] = Number(value) || 0
     })
   }

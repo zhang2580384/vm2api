@@ -1,18 +1,15 @@
 /**
- * Required post-OAuth workflow: wipe first-use Claude Code files, start the
- * slot's cli-node (the same Claude Code build the kernel runs, no separate
- * official install) with the imported credential, complete one hello turn, then
- * optionally keep it resident (do not exit). Slot /usage and seed follow.
- * Credential ownership stays with Go; inference follows the slot engine.
- * Successful hello then aligns seed + official identity and reloads the slot
- * through the engine-aware lifecycle so both Go credentials and Rust inference
- * are healthy before the resident CLI starts.
- * Node restart still kills the detached host python; listen() restores
- * already-initialized residents without another hello.
+ * Post-OAuth workflow: run the slot's cli-node with the imported credential,
+ * complete one hello turn, then optionally keep it resident. Slot /usage and
+ * seed follow. Existing native identity, settings, credentials and telemetry
+ * backlog survive initialization and reauthorization.
  *
- * Every bootstrap CLI runs with CLAUDE_CODE_HOST_REFRESH=1 (the name
- * cli-node 2.1.296 reads) plus CLAUDE_CODE_VERSION. The host Go Refresher
- * is the only RT writer. Node never dials Anthropic.
+ * Telemetry synchronization publishes the saved VM policy; it never opts a
+ * VM in, rotates identity, or restarts the telemetry/inference process.
+ * Node restart restores already-initialized residents without another hello.
+ * Every bootstrap CLI runs with CLAUDE_CODE_HOST_REFRESH=1 plus the supported
+ * CLAUDE_CODE_VERSION. The guest Go Refresher is the only RT writer; Node never
+ * dials Anthropic.
  * After hello, quota is CLI `/usage` inside the slot (one try, then two retries).
  * Account tier comes from GET /api/oauth/profile via kin-worker oauth.
  */
@@ -25,7 +22,7 @@ import {
   parseVmIndex,
   containerName,
   officialCcUidGid,
-  syncWorkerTelemetry,
+  syncNativeTelemetry,
   isSlotProxyDesynced,
 } from '../vm/vm-runtime.mjs'
 import { slotMemory } from '../vm/machine-spec.mjs'
@@ -43,14 +40,15 @@ import { canOfficialCc, credentialModeOfVm } from './credential-mode.mjs'
 import { ensureWorkerCredential } from '../transport/go-worker-client.mjs'
 import { inferTierFromOfficialStats, parseOfficialCcStats, tierFromOauthProfile } from './official-cc-stats.mjs'
 import { defaultSeedPolicy } from '../protocol/seed-policy.mjs'
-import { OFFICIAL_CLI_VERSION, loadVmIdentity, persistVmSettings } from '../identity/vm-identity.mjs'
+import { OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
 import { applyOfficialFingerprintToVm, readOfficialCcIdentity } from '../identity/official-fingerprint.mjs'
 import { writeSlotSeedFiles, inferProjectRootFromCliHome } from '../vm/slot-seed.mjs'
-import { touchTelemetrySession } from '../vm/worker-telemetry.mjs'
+import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
 import { atomicWriteJson, listVmRecordFiles } from '../vm/vm-file.mjs'
 import { CONTAINER_CLI_NODE_BIN, normalizeOfficialCcInference, resolveOfficialCcInference } from '../vm/slot-engine.mjs'
 import { getVm } from '../vm/vm-registry.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
+import { CRS_OFFICIAL_CLI_SYSTEM } from '../identity/crs-persona.mjs'
 
 export { officialCcUidGid } from '../vm/vm-runtime.mjs'
 export const DEFAULT_HELLO_PROMPT = 'hello'
@@ -487,10 +485,6 @@ export async function restoreOfficialCcResidents(projectRoot, opts = {}) {
 }
 
 export const FIRST_USE_WIPE_RELATIVE = Object.freeze([
-  '.claude.json',
-  '.claude.json.bak-pre-official',
-  '.claude/.claude.json',
-  '.claude/.credentials.json',
   '.claude/.last-cleanup',
   '.claude/projects',
   '.claude/sessions',
@@ -585,9 +579,10 @@ export function writeOfficialCcStatus(homeDir, status) {
     telemetry_enabled: !!status.telemetry_enabled,
     telemetry_official: !!status.telemetry_official,
     identity_wrote: !!status.identity_wrote,
-    sidecar_reloaded: !!status.sidecar_reloaded,
+    telemetry_published: status.telemetry_published === true,
+    telemetry_applied: status.telemetry_applied === true,
+    telemetry_error: status.telemetry_error ? String(status.telemetry_error).slice(0, 100) : null,
     seed_aligned: !!status.seed_aligned,
-    telemetry_touched: !!status.telemetry_touched,
     memory_init: status.memory_init || null,
     memory_idle: status.memory_idle || null,
     memory_restored: status.memory_restored === true,
@@ -635,10 +630,11 @@ export function officialCcShouldSkipAutoInit(projectRoot, vmId, { incoming = {},
   const official = readOfficialCcIdentity(homeDir)
   if (!st || st.status !== 'ok') return { skip: false, reason: 'init_incomplete' }
   const helloDone = !!(st.hello_ok || st.official_login || st.plan_ok)
-  if (!helloDone && (!home.has_user_id || !home.has_machine_id)) {
+  if (!helloDone && !home.has_user_id) {
     return { skip: false, reason: 'init_incomplete' }
   }
-  if (!home.has_user_id || !home.has_machine_id) {
+  // Current native CLI owns userID; legacy machineID is optional and never fabricated.
+  if (!home.has_user_id) {
     return { skip: false, reason: 'missing_official_ids' }
   }
   const incomingAccount = incoming.account_uuid || incoming.accountUuid || null
@@ -667,12 +663,7 @@ export function wipeOfficialFirstUseHome(homeDir, { uid, gid } = {}) {
   fs.mkdirSync(claudeDir, { recursive: true })
   for (const name of fs.readdirSync(claudeDir)) {
     if (KEEP_CREDENTIAL_NAMES.has(name)) continue
-    if (
-      name.startsWith('kin-official-') ||
-      name === 'settings.json' ||
-      name === 'kin-seed.json' ||
-      name === 'kin-identity.json'
-    ) {
+    if (name.startsWith('kin-official-')) {
       try {
         fs.rmSync(path.join(claudeDir, name), { recursive: true, force: true })
       } catch {}
@@ -809,6 +800,11 @@ export function buildOfficialCcDockerArgs({
       ...(slash
         ? [text, '--print', '--permission-mode', 'bypassPermissions', '--output-format', 'stream-json', '--verbose']
         : ['-p', text, '--permission-mode', 'bypassPermissions', '--output-format', 'json']),
+      // Direct api.anthropic.com: this CLI build drops the first-party identity
+      // block, and the gateway persona never runs. Compact Agent SDK identity
+      // is refused; the official CLI sentence has to land as system[0].
+      '--append-system-prompt',
+      CRS_OFFICIAL_CLI_SYSTEM,
     ],
     {
       user: `${uid}:${gid}`,
@@ -927,91 +923,55 @@ function persistOfficialCcFingerprint(vmPath, homeDir) {
   return applyOfficialFingerprintToVm(vmPath, homeDir)
 }
 
-/**
- * Post-init telemetry close-out used by vm-05 / vm-13 / vm-30:
- * normalize seed (telemetry on, NONESSENTIAL=1, grove_enabled false), write official
- * ~/.claude.json IDs into worker.json.telemetry, reload the slot so
- * `kin-worker telemetry` starts, then touch a 10-minute session.
- * Never docker rm.
- */
-export async function finalizeOfficialCcTelemetry(
-  projectRoot,
-  vmId,
-  { reload = true, enable = true, routing = {}, reloadSlot = reloadSlotReady } = {},
-) {
-  if (!projectRoot || !vmId) {
-    return { wrote: false, enabled: false, official: false, reloaded: false, seed_aligned: false, touched: false }
+/** Publish the saved policy to the native owner, without changing consent or restarting it. */
+export async function finalizeOfficialCcTelemetry(projectRoot, vmId, { publish = true, routing = {} } = {}) {
+  const failed = {
+    ok: false,
+    wrote: false,
+    enabled: false,
+    official: false,
+    seed_aligned: false,
+    published: false,
+    applied: false,
   }
-  const vmPath = path.join(projectRoot, 'vms', `${vmId}.json`)
-  if (!fs.existsSync(vmPath)) {
-    return { wrote: false, enabled: false, official: false, reloaded: false, seed_aligned: false, touched: false }
-  }
+  if (!projectRoot || !vmId) return { ...failed, error: 'invalid_vm' }
   let vm
   try {
-    vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+    vm = JSON.parse(fs.readFileSync(path.join(projectRoot, 'vms', `${vmId}.json`), 'utf8'))
   } catch {
-    return { wrote: false, enabled: false, official: false, reloaded: false, seed_aligned: false, touched: false }
+    return { ...failed, error: 'vm_not_found' }
   }
-  const seed = defaultSeedPolicy({
-    ...(vm.seed_policy || {}),
-    telemetry_disabled: enable ? false : vm.seed_policy?.telemetry_disabled !== false,
-  })
-  vm.seed_policy = seed
-  vm.updated_at = new Date().toISOString()
-  atomicWriteJson(vmPath, vm, { mode: 0o600 })
-  const homeDir = officialCcHome(projectRoot, vmId)
-  applySeedAfterOfficialInit(homeDir, vm, seed, projectRoot)
-  const tel = writeOfficialCcTelemetry(projectRoot, vmId)
-  let reloaded = false
-  if (reload && tel.enabled) {
-    try {
-      const r = await reloadSlot(vm, projectRoot, { routing })
-      reloaded = r?.ok === true && r?.rust_ok !== false
-    } catch {}
+  const identity = readOfficialCcIdentity(officialCcHome(projectRoot, vmId))
+  const saved = {
+    ...failed,
+    enabled: vm.seed_policy?.telemetry_disabled === false,
+    official: !!(identity.user_id || identity.machine_id),
   }
-  let touched = false
-  if (tel.enabled) {
-    try {
-      touched = !!touchTelemetrySession(projectRoot, vmId).wrote
-    } catch {}
-  }
-  return {
-    wrote: !!tel.wrote,
-    enabled: tel.enabled === true,
-    official: !!tel.official,
-    identity_wrote: !!tel.identity_wrote,
-    fingerprint_wrote: !!tel.fingerprint_wrote,
-    seed_aligned: true,
-    reloaded,
-    touched,
-  }
-}
-
-/** Fingerprint + kin-identity + worker.json.telemetry from official ~/.claude.json. */
-export function writeOfficialCcTelemetry(projectRoot, vmId) {
-  if (!projectRoot || !vmId) return { wrote: false, enabled: false, official: false }
-  const vmPath = path.join(projectRoot, 'vms', `${vmId}.json`)
-  if (!fs.existsSync(vmPath)) return { wrote: false, enabled: false, official: false }
-  const homeDir = officialCcHome(projectRoot, vmId)
-  const fingerprint = persistOfficialCcFingerprint(vmPath, homeDir)
-  let vm
   try {
-    vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-  } catch {
-    return {
-      wrote: false,
-      enabled: false,
-      official: !!fingerprint?.official,
-      identity_wrote: !!fingerprint?.identity_wrote,
+    if (publish) {
+      const result = await applyNativeTelemetry({ projectRoot, vm, routing })
+      return {
+        ...saved,
+        ok: result.ok === true,
+        wrote: result.wrote === true,
+        seed_aligned: result.seed?.wrote === true,
+        published: result.published === true,
+        applied: result.applied === true,
+        state: result.state || null,
+        error: result.ok ? null : result.code || 'telemetry_publish_failed',
+      }
     }
-  }
-  const tel = syncWorkerTelemetry(vm, projectRoot)
-  return {
-    wrote: !!tel.wrote,
-    enabled: tel.enabled === true,
-    official: !!fingerprint?.official,
-    identity_wrote: !!fingerprint?.identity_wrote || !!fingerprint?.wrote,
-    fingerprint_wrote: !!fingerprint?.wrote,
+    const seed = applySeedAfterOfficialInit(officialCcHome(projectRoot, vmId), vm, null, projectRoot)
+    const config = syncNativeTelemetry(vm, projectRoot, routing, { publish: false })
+    return {
+      ...saved,
+      ok: seed.wrote === true && config.wrote === true,
+      wrote: config.wrote === true,
+      seed_aligned: seed.wrote === true,
+      error: config.error || (seed.wrote && config.wrote ? null : 'telemetry_config_failed'),
+    }
+  } catch {
+    return { ...saved, error: 'telemetry_publish_failed' }
   }
 }
 
@@ -1294,13 +1254,18 @@ export async function runOfficialCcBootstrap(rawOpts = {}) {
       force,
       step: 'seed',
     })
+    let seed = null
+    let seedError = null
     if (applySeed !== false) {
       try {
         vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        applySeedAfterOfficialInit(homeDir, vm)
-      } catch {}
+        seed = applySeedAfterOfficialInit(homeDir, vm)
+        if (!seed.wrote) seedError = 'seed_write_failed'
+      } catch {
+        seedError = 'seed_write_failed'
+      }
     }
-    if (reconcileFingerprint !== false) persistOfficialCcFingerprint(vmPath, homeDir)
+    const fingerprint = reconcileFingerprint !== false ? persistOfficialCcFingerprint(vmPath, homeDir) : null
     if (typeof collectIdentity === 'function') {
       try {
         await collectIdentity(projectRoot, JSON.parse(fs.readFileSync(vmPath, 'utf8')))
@@ -1323,9 +1288,17 @@ export async function runOfficialCcBootstrap(rawOpts = {}) {
       step: 'telemetry',
     })
     const telemetry =
-      syncTelemetry !== false && hello.ok
-        ? await finalizeOfficialCcTelemetry(projectRoot, vmId, { reload: true, enable: true, routing })
-        : writeOfficialCcTelemetry(projectRoot, vmId)
+      syncTelemetry === true && hello.ok
+        ? await finalizeOfficialCcTelemetry(projectRoot, vmId, { publish: true, routing })
+        : {
+            wrote: false,
+            enabled: vm.seed_policy?.telemetry_disabled === false,
+            official: !!readOfficialCcIdentity(homeDir).user_id,
+            published: false,
+            applied: false,
+            seed_aligned: seed?.wrote === true,
+            error: seedError,
+          }
 
     const homeAfter = summarizeOfficialCcHome(homeDir)
     const ok = !!(hello.ok && usageOk)
@@ -1356,10 +1329,11 @@ export async function runOfficialCcBootstrap(rawOpts = {}) {
       telemetry_wrote: telemetry.wrote,
       telemetry_enabled: telemetry.enabled,
       telemetry_official: telemetry.official,
-      identity_wrote: telemetry.identity_wrote,
-      sidecar_reloaded: telemetry.reloaded === true,
+      identity_wrote: fingerprint?.identity_wrote === true,
+      telemetry_published: telemetry.published === true,
+      telemetry_applied: telemetry.applied === true,
+      telemetry_error: telemetry.error,
       seed_aligned: telemetry.seed_aligned === true,
-      telemetry_touched: telemetry.touched === true,
       ...homeAfter,
       memory_init: memory,
       memory_idle: idleMemory,

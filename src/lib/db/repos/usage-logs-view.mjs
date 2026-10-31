@@ -141,6 +141,18 @@ function specialSettings(row) {
     out.push({ key: 'mismatch', label: '模型重定向', value: `${row.requested_model} → ${row.upstream_model}` })
   if (row.speed === 'fast') out.push({ key: 'fast', label: 'Fast 模式', value: row.speed })
   if (row.service_tier === 'priority') out.push({ key: 'priority', label: 'Priority', value: row.service_tier })
+  // Sent priority, upstream echoed another tier: Codex did not serve it as Fast (#777).
+  if (
+    (row.service_tier === 'priority' || row.service_tier === 'fast') &&
+    row.upstream_service_tier &&
+    row.upstream_service_tier !== 'priority' &&
+    row.upstream_service_tier !== 'fast'
+  )
+    out.push({
+      key: 'tier_downgrade',
+      label: 'Fast 未生效',
+      value: `${row.service_tier} → ${row.upstream_service_tier}`,
+    })
   if (row.long_context === 1) out.push({ key: 'context1m', label: '1M 上下文' })
   if (row.via && row.via !== DEFAULT_VIA) out.push({ key: 'via', label: '路由', value: row.via })
   return out
@@ -157,7 +169,7 @@ export function toUsageLogRow(row, names, chain = []) {
   const accountId = row.final_account_id || row.account_id || null
   const inputTokens = num(row.input_tokens)
   const outputTokens = num(row.output_tokens)
-  const cacheCreation = num(row.cache_creation_tokens)
+  const cacheCreation = nullableNum(row.cache_creation_tokens)
   const cacheRead = num(row.cache_read_tokens)
   const blocked = blockedBy(row)
   return {
@@ -198,6 +210,8 @@ export function toUsageLogRow(row, names, chain = []) {
     costBreakdown: costBreakdown(row),
     durationMs: nullableNum(row.duration_ms),
     ttftMs: nullableNum(row.first_token_ms),
+    firstByteMs: nullableNum(row.first_byte_ms),
+    generationMs: nullableNum(row.generation_ms),
     stopReason: row.stop_reason ?? null,
     attemptCount: nullableNum(row.attempt_count),
     finalState: row.final_state ?? null,
@@ -205,10 +219,13 @@ export function toUsageLogRow(row, names, chain = []) {
     stream: row.stream == null ? null : !!row.stream,
     hasTools: row.has_tools == null ? null : !!row.has_tools,
     serviceTier: row.service_tier ?? null,
+    /** `response.service_tier` the upstream echoed; billing uses serviceTier (the sent tier). */
+    upstreamServiceTier: row.upstream_service_tier ?? null,
     speed: row.speed ?? null,
     context1mApplied: row.long_context == null ? null : row.long_context === 1,
     reasoningEffort: row.reasoning_effort ?? null,
     inboundDeviceId: row.inbound_device_id ?? null,
+    jevState: row.jev_state || null,
     errorClass: row.error_class ?? null,
     errorLabel: row.error_label ?? null,
     errorOwner: row.error_owner ?? null,
@@ -257,6 +274,8 @@ function toProviderChainItem(r, names) {
     action: r.action ?? null,
     downstreamCommitted: !!r.downstream_committed,
     waitMs: nullableNum(r.wait_ms),
+    queueWaitMs: nullableNum(r.queue_wait_ms),
+    schedulingMs: nullableNum(r.scheduling_ms),
     ttftMs: nullableNum(r.ttft_ms),
     latencyMs: nullableNum(r.latency_ms),
     startedAt: r.started_at ?? null,

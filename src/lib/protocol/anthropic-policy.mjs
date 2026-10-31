@@ -462,40 +462,77 @@ export function prepareAnthropicRequest(
   return out
 }
 
-function safeToolName(name, used) {
+function allocateToolName(name, used, { rewrite = true } = {}) {
   const original = String(name || '')
-  if (TOOL_NAME.test(original) && !used.has(original)) {
+  const legal = TOOL_NAME.test(original)
+  if ((!rewrite || legal) && legal && !used.has(original)) {
     used.add(original)
     return original
   }
   const digest = crypto.createHash('sha256').update(original).digest('hex').slice(0, 16)
   let candidate = `kin_tool_${digest}`
   let suffix = 1
-  while (used.has(candidate)) {
+  while (used.has(candidate) || !TOOL_NAME.test(candidate)) {
     candidate = `kin_tool_${digest}_${suffix++}`
   }
   used.add(candidate)
   return candidate
 }
+function rejectToolNames(message) {
+  const error = new Error(message)
+  error.status = 400
+  error.body = { type: 'error', error: { type: 'invalid_request_error', code: 'invalid_tool_name', message } }
+  throw error
+}
+
+function canonicalServerTools(tools) {
+  const seen = new Map()
+  const kept = []
+  for (const tool of tools) {
+    if (!isAnthropicServerTool(tool)) {
+      kept.push(tool)
+      continue
+    }
+    const name = String(tool?.name || '')
+    if (!TOOL_NAME.test(name)) rejectToolNames(`Server tool name '${name}' is not valid.`)
+    const previous = seen.get(name)
+    if (!previous) {
+      seen.set(name, tool)
+      kept.push(tool)
+      continue
+    }
+    if (JSON.stringify(previous) !== JSON.stringify(tool)) {
+      rejectToolNames(`Server tool '${name}' is declared more than once with different options.`)
+    }
+  }
+  return kept
+}
 
 export function rewriteToolNames(body = {}, { enabled = true } = {}) {
-  if (!enabled || !Array.isArray(body.tools) || body.tools.length === 0) {
+  if (!Array.isArray(body.tools) || body.tools.length === 0) {
     return { body, reverse: {} }
   }
   const out = clone(body)
   const used = new Set()
-  const forward = {}
+  out.tools = canonicalServerTools(out.tools)
+  for (const tool of out.tools) {
+    if (isAnthropicServerTool(tool)) used.add(String(tool.name))
+  }
   const reverse = {}
+  const declarations = new Map()
   out.tools = out.tools.map((tool) => {
     if (isAnthropicServerTool(tool)) return tool
     const original = String(tool?.name || '')
-    const rewritten = safeToolName(original, used)
-    forward[original] = rewritten
+    const rewritten = allocateToolName(original, used, { rewrite: enabled })
+    const queue = declarations.get(original) || []
+    queue.push(rewritten)
+    declarations.set(original, queue)
     reverse[rewritten] = original
     return { ...tool, name: rewritten }
   })
-  if (out.tool_choice?.name && forward[out.tool_choice.name]) {
-    out.tool_choice = { ...out.tool_choice, name: forward[out.tool_choice.name] }
+  const canonical = new Map([...declarations].map(([original, names]) => [original, names[0]]))
+  if (out.tool_choice?.name && canonical.has(out.tool_choice.name)) {
+    out.tool_choice = { ...out.tool_choice, name: canonical.get(out.tool_choice.name) }
   }
   if (Array.isArray(out.messages)) {
     out.messages = out.messages.map((message) => {
@@ -503,8 +540,8 @@ export function rewriteToolNames(body = {}, { enabled = true } = {}) {
       return {
         ...message,
         content: message.content.map((block) => {
-          if (block?.type === 'tool_use' && forward[block.name]) {
-            return { ...block, name: forward[block.name] }
+          if (block?.type === 'tool_use' && canonical.has(block.name)) {
+            return { ...block, name: canonical.get(block.name) }
           }
           return block
         }),

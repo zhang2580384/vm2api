@@ -29,7 +29,7 @@ const DEFAULT_UNIFIED = () => ({
   updated_at: null,
 })
 
-function rowToAccount(row) {
+export function rowToAccount(row) {
   if (!row) return null
   const extra = parse(row.extra, {}) || {}
   return {

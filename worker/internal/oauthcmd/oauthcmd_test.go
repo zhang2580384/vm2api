@@ -14,38 +14,6 @@ import (
 	"github.com/dofastted/kin-gateway/worker/internal/credential"
 )
 
-func TestUsageSuccessForwardsUserAgentAndBeta(t *testing.T) {
-	var gotUA, gotBeta string
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		gotUA = request.Header.Get("User-Agent")
-		gotBeta = request.Header.Get("Anthropic-Beta")
-		if request.Header.Get("Authorization") != "Bearer access-live" {
-			t.Fatalf("authorization = %q", request.Header.Get("Authorization"))
-		}
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"daily":{"remaining":10}}`))
-	}))
-	defer server.Close()
-
-	configPath, _ := testConfig(t, server.URL, server.URL+"/oauth/token", map[string]string{"UsEr-AgEnT": "custom-cli"})
-	credPath := filepath.Join(filepath.Dir(configPath), "credentials.json")
-	saveCredential(t, credPath, credential.Credential{AccessToken: "access-live", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()})
-
-	var output bytes.Buffer
-	exitCode := Run([]string{"usage", "--config", configPath}, strings.NewReader(""), &output)
-	if exitCode != 0 {
-		t.Fatalf("exit code = %d, output = %s", exitCode, output.String())
-	}
-	var envelope responseEnvelope
-	decodeOutput(t, &output, &envelope)
-	if !envelope.OK || envelope.Status != http.StatusOK {
-		t.Fatalf("envelope = %+v", envelope)
-	}
-	if gotUA != "custom-cli" || gotBeta != "oauth-2025-04-20" {
-		t.Fatalf("headers: user-agent=%q anthropic-beta=%q", gotUA, gotBeta)
-	}
-}
-
 func TestExpiredCredentialRefreshesBeforeProfileAndPersists(t *testing.T) {
 	var refreshCalls, profileCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -312,7 +280,11 @@ func testConfig(t *testing.T, anthropicURL, tokenURL string, headers map[string]
 		"test_endpoints":     true,
 		"anthropic_base_url": anthropicURL,
 		"oauth_token_url":    tokenURL,
-		"telemetry":          map[string]any{"headers": headers},
+	}
+	for key, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), "user-agent") {
+			raw["oauth_user_agent"] = value
+		}
 	}
 	data, err := json.Marshal(raw)
 	if err != nil {
@@ -333,7 +305,8 @@ func saveCredential(t *testing.T, path string, value credential.Credential) {
 
 func decodeOutput(t *testing.T, output *bytes.Buffer, envelope *responseEnvelope) {
 	t.Helper()
-	if err := json.Unmarshal(output.Bytes(), envelope); err != nil {
+	lines := bytes.Split(bytes.TrimSpace(output.Bytes()), []byte("\n"))
+	if err := json.Unmarshal(lines[len(lines)-1], envelope); err != nil {
 		t.Fatalf("decode output: %v; output=%s", err, output.String())
 	}
 }

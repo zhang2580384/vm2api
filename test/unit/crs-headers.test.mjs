@@ -156,7 +156,8 @@ test('official empty beta uses sub2api DefaultBetaHeader; unofficial uses full m
   assert.match(String(official['anthropic-beta'] || ''), /claude-code-20250219/)
   assert.match(String(official['anthropic-beta'] || ''), /oauth-2025-04-20/)
   assert.match(String(official['anthropic-beta'] || ''), /thinking-token-count-2026-05-13/)
-  assert.match(String(official['anthropic-beta'] || ''), /mid-conversation-system-2026-04-07/)
+  // 833021e2: the 2.1.303 prefix no longer carries the GA mid-conversation-system beta.
+  assert.doesNotMatch(String(official['anthropic-beta'] || ''), /mid-conversation-system-2026-04-07/)
   assert.match(String(official['anthropic-beta'] || ''), /context-management-2025-06-27/)
   assert.doesNotMatch(String(official['anthropic-beta'] || ''), /fine-grained-tool-streaming/)
   assert.doesNotMatch(String(official['anthropic-beta'] || ''), /context-1m/)
@@ -173,7 +174,7 @@ test('official empty beta uses sub2api DefaultBetaHeader; unofficial uses full m
   const unofficial = resolveCrsHeaders({ 'user-agent': 'RikkaHub/1.0' }, dir, null, 'claude-opus-5')
   assert.match(String(unofficial['anthropic-beta'] || ''), /claude-code-20250219/)
   assert.match(String(unofficial['anthropic-beta'] || ''), /thinking-token-count-2026-05-13/)
-  assert.match(String(unofficial['anthropic-beta'] || ''), /mid-conversation-system-2026-04-07/)
+  assert.doesNotMatch(String(unofficial['anthropic-beta'] || ''), /mid-conversation-system-2026-04-07/)
   assert.match(String(unofficial['anthropic-beta'] || ''), /context-management-2025-06-27/)
   assert.doesNotMatch(String(unofficial['anthropic-beta'] || ''), /context-1m-2025-08-07/)
   assert.equal(unofficial['anthropic-dangerous-direct-browser-access'], 'true')
@@ -409,5 +410,58 @@ test('guest locale and amd64 arch map onto outbound /v1 headers', () => {
   assert.equal(identity.fingerprint.device_id, 'dev-keep')
   assert.equal(identity.fingerprint.locale, 'en_US.UTF-8')
   assert.equal(identity.fingerprint.timezone, 'America/Los_Angeles')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('official agent ids pass through and are not stored', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cc-agent-'))
+  const identity = {
+    userAgent: 'claude-cli/2.1.234 (external, cli)',
+    callerSessionId: 'slot-session',
+    fingerprint: { x_app: 'cli' },
+  }
+  const model = 'claude-sonnet-5'
+  const out = resolveCrsHeaders(
+    {
+      'user-agent': 'claude-cli/2.1.234 (external, cli)',
+      'anthropic-beta': 'oauth-2025-04-20,claude-code-20250219',
+      'x-claude-code-agent-id': 'agent-a',
+      'X-Claude-Code-Parent-Agent-Id': 'agent-parent',
+    },
+    dir,
+    identity,
+    model,
+  )
+  assert.equal(out['x-claude-code-agent-id'], 'agent-a')
+  assert.equal(out['x-claude-code-parent-agent-id'], 'agent-parent')
+  const stored = JSON.parse(fs.readFileSync(path.join(dir, '.claude', 'kin-cc-headers.json'), 'utf8'))
+  assert.equal(stored.headers['x-claude-code-agent-id'], undefined)
+  assert.equal(stored.headers['x-claude-code-parent-agent-id'], undefined)
+
+  const absent = resolveCrsHeaders(
+    {
+      'user-agent': 'claude-cli/2.1.234 (external, cli)',
+      'anthropic-beta': 'oauth-2025-04-20,claude-code-20250219',
+      'x-claude-code-agent-id': '',
+    },
+    dir,
+    identity,
+    model,
+  )
+  assert.equal(absent['x-claude-code-agent-id'], undefined)
+  assert.equal(absent['x-claude-code-parent-agent-id'], undefined)
+
+  const unofficial = resolveCrsHeaders(
+    {
+      'user-agent': 'Go-http-client/2.0',
+      'x-claude-code-agent-id': 'agent-a',
+      'x-claude-code-parent-agent-id': 'agent-parent',
+    },
+    dir,
+    identity,
+    model,
+  )
+  assert.equal(unofficial['x-claude-code-agent-id'], undefined)
+  assert.equal(unofficial['x-claude-code-parent-agent-id'], undefined)
   fs.rmSync(dir, { recursive: true, force: true })
 })

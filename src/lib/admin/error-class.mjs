@@ -3,6 +3,8 @@
  * Derived from status / error_code / message so historical rows classify without a migration.
  */
 
+import { isUsagePolicyErrorMessage } from '../core/errors.mjs'
+
 export const ERROR_CLASSES = {
   auth: { id: 'auth', owner: 'client', label: '认证' },
   request: { id: 'request', owner: 'client', label: '请求格式' },
@@ -236,6 +238,17 @@ export function classifyRequestError(row = {}) {
   if (/signature|thinking block|skip_thought_signature|must contain thinking/.test(text)) id = 'signature'
   else if ((id === 'upstream' || (!id && status === 503)) && /overload|负载过高/.test(text)) id = 'overloaded'
   else if (!id && /no eligible|无可用账号|没有可用账号/.test(text)) id = 'unavailable'
+  // Kernel labels an AUP refusal HTTP 400 upstream_invalid_request. The audit
+  // feed only reads the refusal class, so the sentence wins over that code.
+  // Auth stays credential even when the body quotes the Usage Policy.
+  if (
+    id !== 'auth' &&
+    id !== 'credential' &&
+    isUsagePolicyErrorMessage(row?.error_message) &&
+    !isOauthCredentialFailure(row, text, code)
+  ) {
+    id = 'refusal'
+  }
   if (!id) {
     if (/extra usage|entitlement|quota|5h|7d/.test(text) && (status === 429 || /quota|usage/.test(text))) id = 'quota'
     else if (/socks|proxy|cloudflare|just a moment/.test(text)) id = 'proxy'

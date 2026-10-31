@@ -6,10 +6,10 @@ import {
   type QueryClient,
 } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import type { Vm } from '@/types/panel-vm'
+import type { Vm, VmSeedSettings } from '@/types/panel-vm'
 import { ArrowRight, ChevronRight, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
-import { api } from '@/lib/api'
+import { api, isApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { isCodexVm, slotNameLabel } from '@/lib/vm-kind'
 import { Button } from '@/components/ui/button'
@@ -45,10 +45,8 @@ import {
   vmQueryOptions,
   vmSeedUploadLogQueryOptions,
 } from '@/features/vm/queries'
-import {
-  telemetryEnabled,
-  telemetrySeedFlags,
-} from '@/features/vm/telemetry-policy'
+import { seedSaveState } from '@/features/vm/seed-settings'
+import { telemetrySeedFlags } from '@/features/vm/telemetry-policy'
 
 const LIVE: Record<LiveKey, { legend: string; swatch: string; text: string }> =
   {
@@ -58,22 +56,22 @@ const LIVE: Record<LiveKey, { legend: string; swatch: string; text: string }> =
       text: 'text-primary',
     },
     idle: {
-      legend: '开 · 进程未跑',
+      legend: '开 · 原生就绪',
       swatch: 'bg-[var(--status-caution-solid)]',
       text: 'text-[var(--status-caution)]',
     },
     blocked: {
-      legend: '开 · 无官方身份',
+      legend: '等待或失败',
       swatch: 'bg-[var(--status-warn-solid)]',
       text: 'text-[var(--status-warn)]',
     },
     parked: {
-      legend: '开 · 槽已停',
+      legend: '槽已停 · 待确认',
       swatch: 'bg-[var(--ok-2)]',
       text: 'text-muted-foreground',
     },
     unknown: {
-      legend: '开 · 状态未知',
+      legend: '原生状态待确认',
       swatch: 'bg-[var(--status-none)]',
       text: 'text-muted-foreground',
     },
@@ -84,22 +82,12 @@ const LIVE: Record<LiveKey, { legend: string; swatch: string; text: string }> =
     },
   }
 
-type SeedPutResult = {
-  service?: {
-    failed_count?: number
-    items?: { error?: string }[]
-  } | null
-}
-
-/** Returns the sidecar restart error, if the seed write itself succeeded but the restart did not. */
+/** Desired policy is saved separately from publication and native acknowledgment. */
 async function writeTelemetry(id: string, enabled: boolean) {
-  const res = await api<SeedPutResult>(
+  return api<VmSeedSettings>(
     `/api/panel/vms/${encodeURIComponent(id)}/seed-settings`,
     { method: 'PUT', body: JSON.stringify(telemetrySeedFlags(enabled)) }
   )
-  const svc = res?.service
-  if (!svc?.failed_count) return null
-  return svc.items?.find((item) => item.error)?.error || '遥测旁路重启失败'
 }
 
 async function refreshAfterWrite(qc: QueryClient, ids: string[]) {
@@ -148,10 +136,10 @@ const CONTRACT: { file: string; key: string; on: string; off: string }[] = [
     off: 'disabled',
   },
   {
-    file: 'run/worker.json',
-    key: 'telemetry.enabled',
-    on: 'true',
-    off: 'false',
+    file: 'kin-seed.json',
+    key: 'seed_policy.telemetry_disabled',
+    on: 'false',
+    off: 'true',
   },
 ]
 
@@ -159,19 +147,19 @@ function pipeline(interval: number): { title: string; body: string }[] {
   return [
     {
       title: '播种',
-      body: '开关写进上表各文件。运行中的槽切换后会重启遥测旁路；本机槽同时重启 kin-egress。',
+      body: '单 VM 开关发布到当前 VM；常驻 cli-node 热读，不重启 VM、推理进程或出口服务。',
     },
     {
       title: '身份',
-      body: '旁路只用官方初装留下的身份。还没有身份时 worker.json 保持关闭，旁路空转、不上传。',
+      body: '只读取当前 VM 的凭证、settings、身份和系统特征；有效票据与新鲜出口信息齐备后才可发送。',
     },
     {
       title: '上传',
-      body: `有会话活动时每 ${intervalLabel(interval)} 发一批 event_logging/v2/batch；GrowthBook eval 启动即发，之后每 6 小时。`,
+      body: `必要原生 1P 事件每 ${intervalLabel(interval)} 合批；无额外 GrowthBook 实验事件或 Datadog 上传。`,
     },
     {
       title: '静默',
-      body: '最后一次活动后 10 分钟停发。CLI 自己发出的遥测请求由网关本地应答，不出网。',
+      body: '无事件不发空批。缺票据或出口信息就暂存；关闭立即清队列，换出口丢弃旧出口事件。',
     },
   ]
 }
@@ -197,11 +185,8 @@ function IntervalSetting({
         label='上传间隔'
         desc={
           <>
-            有会话活动时，每隔这么久发一批事件。全局生效，保存后热更新各槽的
-            worker.json，不重启旁路。
-            {value > 600
-              ? '超过 10 分钟时，只有间隔到点且 10 分钟内有活动才会发。'
-              : ''}
+            只在有待发事件时按间隔合批。全局保存后确认发布各 VM 的 kernel.json；
+            不重启进程，缺有效凭证或当前出口信息时暂停上传。
           </>
         }
         value={amountIn(value, unit)}
@@ -247,9 +232,8 @@ export function TelemetryPane({
   const vms: Vm[] = dash.data?.vms || []
   const claude = vms.filter((vm) => !isCodexVm(vm))
   const codexCount = vms.length - claude.length
-  const probed = claude.filter(
-    (vm) => vm.status === 'running' && telemetryEnabled(vm.seed_policy)
-  )
+  // A saved opt-out is not proof that the VM stopped its sender.
+  const probed = claude
   const details = useQueries({
     queries: probed.map((vm) => ({
       ...vmQueryOptions(vm.id),
@@ -259,6 +243,13 @@ export function TelemetryPane({
   })
   const detailById = new Map(probed.map((vm, i) => [vm.id, details[i]]))
   const slots = claude.map((vm) => slotState(vm, detailById.get(vm.id)))
+  const targetsFor = (enabled: boolean) =>
+    slots
+      .filter(
+        (slot) =>
+          slot.on !== enabled || (!slot.confirmed && slot.live !== 'parked')
+      )
+      .map((slot) => slot.vm)
 
   const [busy, setBusy] = useState<Set<string>>(() => new Set())
   const [bulk, setBulk] = useState<{
@@ -273,18 +264,21 @@ export function TelemetryPane({
   const setOne = async (vm: Vm, enabled: boolean) => {
     setBusy((cur) => new Set(cur).add(vm.id))
     try {
-      const svcError = await writeTelemetry(vm.id, enabled)
-      if (svcError) {
-        toast.warning(
-          `${vm.id} 已${enabled ? '开启' : '关闭'}，旁路重启失败：${svcError}`
-        )
-      } else {
-        toast.success(`${vm.id} 遥测已${enabled ? '开启' : '关闭'}`)
-      }
+      const result = await writeTelemetry(vm.id, enabled)
+      const state = seedSaveState(result)
+      if (state === 'applied')
+        toast.success(`${vm.id} 原生已确认${enabled ? '开启' : '关闭'}`)
+      else if (state === 'published')
+        toast.info(`${vm.id} 文件已发布，等待 VM 确认`)
+      else if (state === 'unsupported')
+        toast.warning(`${vm.id} 此运行环境不支持 VM 原生遥测`)
+      else toast.warning(`${vm.id} 已保存，生效状态尚未确认`)
     } catch (error) {
-      toast.error(
-        `${vm.id} 写入失败：${error instanceof Error ? error.message : String(error)}`
-      )
+      const state = seedSaveState(isApiError(error) ? error.data : null)
+      const message = error instanceof Error ? error.message : String(error)
+      if (state !== 'unknown')
+        toast.warning(`${vm.id} 已保存，发布或原生确认失败：${message}`)
+      else toast.error(`${vm.id} 写入失败：${message}`)
     } finally {
       await refreshAfterWrite(qc, [vm.id])
       setBusy((cur) => {
@@ -296,19 +290,20 @@ export function TelemetryPane({
   }
 
   const runBulk = async (enabled: boolean) => {
-    const targets = claude.filter(
-      (vm) => telemetryEnabled(vm.seed_policy) !== enabled
-    )
+    const targets = targetsFor(enabled)
     setConfirm(null)
     if (!targets.length) return
     const failed: string[] = []
-    const restartFailed: string[] = []
+    const pending: string[] = []
     for (const [index, vm] of targets.entries()) {
       setBulk({ enabled, done: index, total: targets.length, current: vm.id })
       try {
-        if (await writeTelemetry(vm.id, enabled)) restartFailed.push(vm.id)
-      } catch {
-        failed.push(vm.id)
+        if (seedSaveState(await writeTelemetry(vm.id, enabled)) !== 'applied')
+          pending.push(vm.id)
+      } catch (error) {
+        if (seedSaveState(isApiError(error) ? error.data : null) !== 'unknown')
+          pending.push(vm.id)
+        else failed.push(vm.id)
       }
     }
     setBulk(null)
@@ -316,18 +311,18 @@ export function TelemetryPane({
       qc,
       targets.map((vm) => vm.id)
     )
-    const ok = targets.length - failed.length
+    const confirmed = targets.length - failed.length - pending.length
     const verb = enabled ? '开启' : '关闭'
     if (failed.length) {
       toast.error(
-        `已${verb} ${ok} 槽，失败 ${failed.length}：${failed.join('、')}`
+        `原生确认${verb} ${confirmed} 槽，待确认 ${pending.length}，写入失败 ${failed.length}：${failed.join('、')}`
       )
-    } else if (restartFailed.length) {
+    } else if (pending.length) {
       toast.warning(
-        `已${verb} ${ok} 槽；旁路重启失败：${restartFailed.join('、')}`
+        `原生确认${verb} ${confirmed} 槽；已保存但未确认：${pending.join('、')}`
       )
     } else {
-      toast.success(`已${verb} ${ok} 槽`)
+      toast.success(`原生确认${verb} ${confirmed} 槽`)
     }
   }
 
@@ -335,11 +330,9 @@ export function TelemetryPane({
     (key) => [key, slots.filter((s) => s.live === key).length] as const
   )
   const onCount = slots.filter((s) => s.on).length
-  const toEnable = claude.length - onCount
-  const pendingTargets =
-    confirm === null
-      ? []
-      : claude.filter((vm) => telemetryEnabled(vm.seed_policy) !== confirm)
+  const toEnable = targetsFor(true).length
+  const toDisable = targetsFor(false).length
+  const pendingTargets = confirm === null ? [] : targetsFor(confirm)
   const pendingRunning = pendingTargets.filter(
     (vm) => vm.status === 'running'
   ).length
@@ -357,14 +350,21 @@ export function TelemetryPane({
         <CardHeader className='flex flex-wrap items-start justify-between gap-x-6 gap-y-3'>
           <div className='min-w-0 space-y-1.5'>
             <CardTitle className='text-base'>遥测</CardTitle>
-            <p className='max-w-[60ch] text-sm text-muted-foreground'>
-              每个 Claude 槽只有一个开关，存在种子策略{' '}
+            <p className='max-w-[68ch] text-sm text-muted-foreground'>
+              每个 Claude 槽只有一个开关。写入{' '}
               <code className='font-mono text-xs text-foreground'>
-                telemetry_disabled
-              </code>
-              。其余键都跟着它写。
+                telemetry_disabled === false
+              </code>{' '}
+              才算开，缺这个值也是关。把{' '}
+              <code className='font-mono text-xs text-foreground'>
+                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+              </code>{' '}
+              改成 0 不会打开：关的时候播种才写成 0，开的时候写成 1。官方 CLI
+              把这个变量的任何已设置值都当成只走必要流量。旧 Go
+              遥测服务已下线，发送者是常驻 cli-node，默认关。展开槽位可提取最近
+              40 条计数日志，不含正文或身份。
               {codexCount
-                ? ` GPT 槽没有遥测旁路，${codexCount} 个不在此列。`
+                ? ` GPT 使用独立统计链路，${codexCount} 个不在此列。`
                 : ''}
             </p>
           </div>
@@ -384,13 +384,13 @@ export function TelemetryPane({
             <Button
               size='sm'
               variant='outline'
-              disabled={!!bulk || onCount === 0}
+              disabled={!!bulk || toDisable === 0}
               onClick={() => setConfirm(false)}
             >
               全部关闭
-              {onCount ? (
+              {toDisable ? (
                 <span className='font-mono text-xs tabular-nums opacity-80'>
-                  {onCount}
+                  {toDisable}
                 </span>
               ) : null}
             </Button>
@@ -431,7 +431,7 @@ export function TelemetryPane({
               ) : null
             )}
             <span className='ms-auto font-mono text-muted-foreground tabular-nums'>
-              {onCount} / {slots.length} 开
+              {onCount} / {slots.length} 策略开启
             </span>
           </div>
           {bulk ? (
@@ -488,8 +488,9 @@ export function TelemetryPane({
         <CardHeader>
           <CardTitle className='text-base'>播种写什么</CardTitle>
           <p className='text-sm text-muted-foreground'>
-            开关决定下面每个键的值。槽内这些键是锁定项，种子页的 extra_env
-            改不动。
+            开关只认
+            telemetry_disabled。下面是播种时跟着写的镜像，手改环境变量不会保持，也不能单独当开关。槽内这些键是锁定项，种子页的
+            extra_env 改不动。
           </p>
         </CardHeader>
         <CardContent>
@@ -553,15 +554,15 @@ export function TelemetryPane({
       <Card className='gap-0 py-0'>
         <ul className='divide-y divide-[var(--hairline)]'>
           <RelatedRow
-            label='换票后同步遥测'
-            detail='官方初装成功后，按官方身份把该槽遥测打开。'
+            label='初装后发布遥测策略'
+            detail='初装成功后只发布已保存的开关，不读取环境变量，不自动开启，也不改写身份。'
             on={routing.isLoading ? null : official?.sync_telemetry === true}
             tab='init'
             tabLabel='初装'
           />
           <RelatedRow
             label='Codex analytics'
-            detail='GPT 内核自己的统计上报，与上面的 Claude 旁路无关。'
+            detail='GPT 内核自己的统计上报，与 Claude VM 原生遥测独立。'
             on={routing.isLoading ? null : codex?.analytics?.enabled === true}
             tab='openai'
             tabLabel='OpenAI'
@@ -580,15 +581,16 @@ export function TelemetryPane({
             <p>
               依次重写 {pendingTargets.length} 个槽的种子文件
               {pendingRunning
-                ? `；其中 ${pendingRunning} 个在运行，会重启遥测旁路，本机槽还会重启 kin-egress，正在走的请求可能断一次`
+                ? `；其中 ${pendingRunning} 个运行中，将等待原生配置确认，不中断推理或重启出口`
                 : ''}
               。
             </p>
             {confirm ? (
               <p>
-                没有官方初装身份的槽会写成开，但要等身份写入后才会上传。
+                只有本 VM 的有效 profile 凭据、真实身份和新鲜出口信息齐备后，
+                才按周期发送必要原生 1P 事件。不会制造初装活动或从控制面代发。
                 {pendingRemote
-                  ? `其中 ${pendingRemote} 个是集群槽：集群节点不支持官方初装，开了也不会上传。`
+                  ? ` ${pendingRemote} 个集群槽必须完成所在节点的文件发布与原生确认。`
                   : ''}
               </p>
             ) : null}
@@ -670,7 +672,7 @@ function SlotRow({
   onToggleOpen: () => void
   onSet: (enabled: boolean) => void
 }) {
-  const { vm, on, live, label, probing } = slot
+  const { vm, on, live, label, probing, confirmed } = slot
   const name = slotNameLabel(vm)
   const panelId = `telemetry-log-${vm.id}`
   return (
@@ -712,11 +714,9 @@ function SlotRow({
           className='hidden items-center gap-2 text-xs sm:flex'
           title={
             live === 'blocked'
-              ? vm.node_id
-                ? '种子是开的，但这个集群槽没有官方初装身份，worker.json 保持关闭，旁路空转、不上传。集群节点槽目前不支持官方初装。'
-                : '种子是开的，但 worker.json 没有官方初装身份，旁路空转、不上传。完成官方初装后会自动开始。'
+              ? '按真实状态等待有效凭证、当前出口信息，或显示最近上传失败；不会借用宿主或其他 VM 数据。'
               : live === 'idle'
-                ? '开着但旁路进程没在跑，通常是旁路正在重启。'
+                ? '原生发送者空闲或等待下一次合批。'
                 : undefined
           }
         >
@@ -739,7 +739,12 @@ function SlotRow({
                 type='button'
                 aria-pressed={active}
                 aria-label={`${value ? '开启' : '关闭'} ${vm.id} 遥测`}
-                disabled={busy || locked || active}
+                disabled={busy || locked || (active && confirmed)}
+                title={
+                  active && !confirmed
+                    ? '重新发布当前策略并等待 VM 确认'
+                    : undefined
+                }
                 onClick={() => onSet(value)}
                 className={cn(
                   'min-w-9 rounded-[5px] px-2.5 py-1 text-xs font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-default',
@@ -756,14 +761,7 @@ function SlotRow({
           })}
         </div>
       </div>
-      {open ? (
-        <UploadPanel
-          id={vm.id}
-          panelId={panelId}
-          on={on}
-          remote={!!vm.node_id}
-        />
-      ) : null}
+      {open ? <UploadPanel id={vm.id} panelId={panelId} on={on} /> : null}
     </li>
   )
 }
@@ -772,12 +770,10 @@ function UploadPanel({
   id,
   panelId,
   on,
-  remote,
 }: {
   id: string
   panelId: string
   on: boolean
-  remote: boolean
 }) {
   const log = useQuery({
     ...vmSeedUploadLogQueryOptions(id),
@@ -798,20 +794,18 @@ function UploadPanel({
         </p>
       ) : summary.entries.length === 0 ? (
         <p className='text-xs text-muted-foreground'>
-          {remote
-            ? '集群槽的上传记录写在节点上，面板目前读不到。'
-            : on
-              ? '还没有上传记录。有会话活动后旁路开始上传，这里会出现。'
-              : '遥测关着，没有上传记录。'}
+          {on
+            ? '还没有上传记录。完成一次原生批量上传后会出现。'
+            : '遥测关着，没有新的上传记录。'}
         </p>
       ) : (
         <>
           <dl className='flex flex-wrap gap-x-6 gap-y-1 text-xs'>
-            <Stat label='最后上传'>
+            <Stat label='最近尝试'>
               {summary.last ? relativeAgo(summary.last, now) : '—'}
             </Stat>
             <Stat label='批次'>{summary.batch}</Stat>
-            <Stat label='GrowthBook'>{summary.evals}</Stat>
+            <Stat label='事件尝试'>{summary.events}</Stat>
             <Stat label='失败' tone={summary.failed ? 'bad' : undefined}>
               {summary.failed}
             </Stat>
@@ -827,10 +821,13 @@ function UploadPanel({
           <details className='group'>
             <summary className='inline-flex cursor-pointer items-center gap-1 rounded text-xs text-muted-foreground select-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'>
               <ChevronRight className='size-3.5 group-open:rotate-90 motion-safe:transition-transform' />
-              原始记录（身份字段已剔除）
+              计数 / 状态记录
             </summary>
             <pre className='mt-2 max-h-64 overflow-auto rounded-md bg-background/60 px-3 py-2 font-mono text-[11px] leading-5 text-foreground'>
-              {[...(log.data || [])].reverse().join('\n')}
+              {[...summary.entries]
+                .reverse()
+                .map((entry) => entry.raw)
+                .join('\n')}
             </pre>
           </details>
         </>
@@ -890,14 +887,10 @@ function Timeline({
           return (
             <span
               key={`${entry.at}:${i}`}
-              title={`${clock(entry.at)} · ${entry.kind}${entry.name ? ` ${entry.name}` : ''} · ${entry.state}`}
+              title={`${clock(entry.at)} · ${entry.events} 个事件 · ${entry.ok ? '成功' : entry.error || '失败'}`}
               className={cn(
                 'absolute top-1/2 w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full',
-                !entry.ok
-                  ? 'h-5 bg-[var(--status-bad)]'
-                  : entry.kind === 'eval'
-                    ? 'h-5 bg-[var(--chart-2)]'
-                    : 'h-3 bg-primary'
+                !entry.ok ? 'h-5 bg-[var(--status-bad)]' : 'h-3 bg-primary'
               )}
               style={{ left: `calc(0.5rem + ${x} * (100% - 1rem))` }}
             />
@@ -908,7 +901,6 @@ function Timeline({
         <span>{clock(first)}</span>
         <span className='flex items-center gap-3 font-sans'>
           <Key swatch='bg-primary' label='批次' />
-          <Key swatch='bg-[var(--chart-2)]' label='GrowthBook' />
           <Key swatch='bg-[var(--status-bad)]' label='失败' />
         </span>
         <span>{clock(last)}</span>

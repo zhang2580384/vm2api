@@ -1,12 +1,13 @@
 /**
- * OAuth import surface. Production exchange runs in the local-only
- * `kin-oauth-auth` binary; auth.js is loaded dynamically only by tests.
+ * Linux exchanges execute kin-oauth-auth in the target VM. The native macOS
+ * path preserves its existing helper; auth.js is loaded only by fetch test seams.
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CAI_AUTHORIZE_URL, CLIENT_ID, FULL_OAUTH_SCOPE, REDIRECT_URI } from './oauth-contract.mjs'
+import { carryOAuthAttempt, runGuestOAuthAuthService } from './guest-oauth-helper.mjs'
 
 export { CLIENT_ID, REDIRECT_URI }
 
@@ -29,7 +30,7 @@ function serviceFailure(code, message) {
   return error
 }
 
-function runOAuthAuthService(payload) {
+function runNativeOAuthAuthService(payload) {
   const bin = findOAuthAuthBin()
   if (!bin) return Promise.reject(serviceFailure('oauth_auth_bin_missing', 'kin-oauth-auth not found'))
   return new Promise((resolve, reject) => {
@@ -234,18 +235,24 @@ export async function exchangeTokenViaCookieAuth({
   redirectUri = null,
   fetchImpl = null,
   timeoutMs = 15000,
+  exec,
+  projectRoot,
+  routing,
 } = {}) {
   const parsed = parseFullCode(code, state)
   if (!fetchImpl) {
-    return runOAuthAuthService({
-      operation: 'exchange_code',
-      code: parsed.code,
-      code_verifier: codeVerifier,
-      state: parsed.state,
-      redirect_uri: redirectUri || REDIRECT_URI,
-      proxy_url: proxyUrl,
-      timeout_ms: timeoutMs,
-    })
+    return runGuestOAuthAuthService(
+      {
+        operation: 'exchange_code',
+        code: parsed.code,
+        code_verifier: codeVerifier,
+        state: parsed.state,
+        redirect_uri: redirectUri || REDIRECT_URI,
+        proxy_url: proxyUrl,
+        timeout_ms: timeoutMs,
+      },
+      { exec, projectRoot, routing, timeoutMs, runNative: runNativeOAuthAuthService },
+    )
   }
   const auth = await loadLocalAuthForTest()
   const token = await auth.exchangeAuthorizationCode({
@@ -262,7 +269,7 @@ export async function exchangeTokenViaCookieAuth({
 
 export async function sessionKeyToOAuth(
   sessionKey,
-  { scope = 'full', proxyUrl = null, fetchImpl = null, timeoutMs = 15000 } = {},
+  { scope = 'full', proxyUrl = null, fetchImpl = null, timeoutMs = 15000, exec, projectRoot, routing } = {},
 ) {
   const sk = String(sessionKey || '')
     .trim()
@@ -277,14 +284,17 @@ export async function sessionKeyToOAuth(
     const requestedScope = FULL_OAUTH_SCOPE
     const setup = String(scope || '').toLowerCase() === 'inference'
     const cred = !fetchImpl
-      ? await runOAuthAuthService({
-          operation: 'session_key',
-          session_key: sk,
-          scope: requestedScope,
-          runtime_mode: setup ? 'setup-token' : 'oauth',
-          proxy_url: proxyUrl,
-          timeout_ms: timeoutMs,
-        })
+      ? await runGuestOAuthAuthService(
+          {
+            operation: 'session_key',
+            session_key: sk,
+            scope: requestedScope,
+            runtime_mode: setup ? 'setup-token' : 'oauth',
+            proxy_url: proxyUrl,
+            timeout_ms: timeoutMs,
+          },
+          { exec, projectRoot, routing, timeoutMs, runNative: runNativeOAuthAuthService },
+        )
       : await (async () => {
           const auth = await loadLocalAuthForTest()
           return auth.sessionKeyToAuthorizedOAuth({
@@ -295,13 +305,13 @@ export async function sessionKeyToOAuth(
             timeoutMs,
           })
         })()
-    return {
+    return carryOAuthAttempt(cred, {
       ...cred,
       type: setup ? 'setup-token' : cred.type || 'oauth',
       mode: setup ? 'setup-token' : cred.mode || 'oauth',
       scope: cred.scope || requestedScope,
       source: cred.source || 'sessionKey-cookie-auth',
-    }
+    })
   } catch (e) {
     const err = new Error(publicImportError(e.message || 'session import failed'))
     const classified = classifyImportHelperOutput(e.message)

@@ -77,6 +77,7 @@ export async function startRealChain({
   cacheTtl = '5m',
   routingBase = null,
   timezone = 'America/New_York',
+  upstreamSse = null,
 }) {
   const cleanups = []
   let closed = false
@@ -107,7 +108,7 @@ export async function startRealChain({
         return res.end(json(body.model))
       }
       res.writeHead(200, { 'content-type': 'text/event-stream', 'request-id': 'req_303' })
-      res.end(sse(body.model))
+      res.end(upstreamSse || sse(body.model))
     })
     await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve))
     cleanups.push(async () => {

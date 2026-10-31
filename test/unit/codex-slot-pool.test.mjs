@@ -127,6 +127,18 @@ test('429 and usage_limit_reached fail over; committed hops do not', () => {
     true,
   )
   assert.equal(
+    isCodexFailoverError({ ok: false, status: 503, committed: false, body: { error: { code: 'overloaded' } } }),
+    true,
+  )
+  assert.equal(
+    isCodexFailoverError({
+      ok: false,
+      status: 413,
+      body: { error: { code: 'invalid_request', message: 'request exceeds slot memory' } },
+    }),
+    false,
+  )
+  assert.equal(
     isCodexFailoverError({ ok: false, status: 503, committed: true, body: { error: { code: 'server_error' } } }),
     false,
   )

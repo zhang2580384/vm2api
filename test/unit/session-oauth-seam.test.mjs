@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   sessionKeyToOAuth,
-  exchangeTokenViaCookieAuth,
   classifyImportHelperOutput,
   publicImportError,
   panelImportErrorPayload,
@@ -10,147 +9,36 @@ import {
   extractOAuthCodeFromRedirect,
 } from '../../src/lib/oauth/cookie-auth.mjs'
 import fs from 'node:fs'
-import {
-  BOOTSTRAP_URL,
-  FULL_OAUTH_SCOPE,
-  REDIRECT_URI,
-  TOKEN_UA,
-  TOKEN_URL,
-} from '../../src/lib/oauth/oauth-contract.mjs'
+import os from 'node:os'
+import path from 'node:path'
+import { FULL_OAUTH_SCOPE } from '../../src/lib/oauth/oauth-contract.mjs'
+import { slotExec } from '../../src/lib/vm/slot-runtime.mjs'
 
-// auth.js is the local source of the kin-oauth-auth binary and is not in the repo.
-const localAuthSkip = fs.existsSync(new URL('../../src/lib/oauth/auth.js', import.meta.url))
-  ? false
-  : 'src/lib/oauth/auth.js is local-only (shipped as bin/kin-oauth-auth)'
-
-test('KIN_FAKE_SESSION_OAUTH returns deterministic creds without network', async () => {
-  process.env.KIN_FAKE_SESSION_OAUTH = '1'
-  const cred = await sessionKeyToOAuth('sk-ant-sid-test-aaaaaaaa')
-  assert.equal(cred.source, 'KIN_FAKE_SESSION_OAUTH')
-  assert.equal(cred.email, 'fake-oauth@kin.test')
-  assert.match(cred.access_token, /^sk-ant-oat01-FAKE/)
-  assert.ok(cred.expires_at > Math.floor(Date.now() / 1000))
-  delete process.env.KIN_FAKE_SESSION_OAUTH
-})
-
-test('fake inference scope is setup-token', async () => {
-  process.env.KIN_FAKE_SESSION_OAUTH = '1'
-  const cred = await sessionKeyToOAuth('sk-ant-sid-test-aaaaaaaa', { scope: 'inference' })
-  assert.equal(cred.type, 'setup-token')
-  assert.equal(cred.mode, 'setup-token')
-  assert.equal(cred.scope, FULL_OAUTH_SCOPE)
-  delete process.env.KIN_FAKE_SESSION_OAUTH
-})
-
-test('fake branch still rejects non-sid keys', async () => {
-  process.env.KIN_FAKE_SESSION_OAUTH = '1'
+test('sessionKeyToOAuth rejects malformed session cookies before execution', async () => {
   await assert.rejects(() => sessionKeyToOAuth('not-a-sid'), /sk-ant-sid/)
-  delete process.env.KIN_FAKE_SESSION_OAUTH
 })
 
-test('sessionKeyToOAuth refuses an unbound VM in production', async () => {
-  await assert.rejects(
-    () => sessionKeyToOAuth('sk-ant-sid01-testaaaaaaaa', { proxyUrl: null }),
-    (e) => e.code === 'proxy_required',
-  )
-})
-
-// Spawns the shipped bin/kin-oauth-auth: a bundle with an unbound constant
-// fails with ReferenceError before dialing, instead of a transport error.
-test('sessionKeyToOAuth binary dials the claude.ai organizations hop', async () => {
-  await assert.rejects(
-    () => sessionKeyToOAuth('sk-ant-sid01-testaaaaaaaa', { scope: 'inference', proxyUrl: 'socks5://127.0.0.1:1' }),
-    (e) => e.code === 'get_organizations_transport' && /claude\.ai\/api\/organizations/.test(e.message),
-  )
-})
-
-test('sessionKeyToOAuth on local egress hops without PROXY_URL', { skip: localAuthSkip }, async () => {
-  const seen = []
-  const cred = await sessionKeyToOAuth('sk-ant-sid01-testaaaaaaaa', {
-    proxyUrl: '',
-    fetchImpl: makeStrictOAuthFetch(seen),
-  })
-  assert.equal(cred.access_token, 'sk-ant-oat01-token')
-  assert.equal(seen.length, 4)
-})
-
-test('sessionKeyToOAuth performs strict org authorize token bootstrap flow', {
-  skip: localAuthSkip,
-}, async () => {
-  const seen = []
-  const cred = await sessionKeyToOAuth('sk-ant-sid01-testaaaaaaaa', {
-    proxyUrl: 'socks5://127.0.0.1:1080',
-    scope: 'inference',
-    fetchImpl: makeStrictOAuthFetch(seen),
-  })
-  assert.equal(cred.type, 'setup-token')
-  assert.equal(cred.mode, 'setup-token')
-  assert.equal(cred.scope, FULL_OAUTH_SCOPE)
-  assert.equal(cred.email, 'sk@example.com')
-  assert.equal(cred.account_uuid, 'acct-sk')
-  assert.equal(cred.org_uuid, 'org-sk')
-  assert.equal(cred.refresh_token, 'sk-ant-ort01-token')
-  assert.deepEqual(
-    seen.map((r) => r.stage),
-    ['orgs', 'authorize', 'token', 'bootstrap'],
-  )
-})
-
-test('sessionKeyToOAuth maps stale authorize response', { skip: localAuthSkip }, async () => {
+test('sessionKeyToOAuth refuses a persisted VM without bound egress', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cookie-unbound-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const vm = { id: 'vm-01', runtime: { type: 'docker' } }
+  fs.mkdirSync(path.join(root, 'vms'))
+  fs.writeFileSync(path.join(root, 'vms', `${vm.id}.json`), JSON.stringify(vm))
   await assert.rejects(
     () =>
-      sessionKeyToOAuth('sk-ant-sid01-testaaaaaaaa', {
+      sessionKeyToOAuth('sk-ant-sid-unit-cookie', {
+        exec: slotExec(root, vm),
+        projectRoot: root,
         proxyUrl: 'socks5h://127.0.0.1:1',
-        fetchImpl: makeStrictOAuthFetch([], {
-          authorizeStatus: 403,
-          authorizeBody: { error: 'Session is not fresh enough' },
-        }),
       }),
-    (e) => e.code === 'session_stale_relogin',
+    { code: 'proxy_required' },
   )
 })
 
-test('exchangeTokenViaCookieAuth posts token then requires bootstrap', { skip: localAuthSkip }, async () => {
-  const seen = []
-  const tok = await exchangeTokenViaCookieAuth({
-    code: 'abc#state-1',
-    codeVerifier: 'ver',
-    proxyUrl: 'socks5h://127.0.0.1:1',
-    fetchImpl: makeStrictOAuthFetch(seen, { tokenOnly: true }),
+test('sessionKeyToOAuth cannot substitute a controller proxy for a target VM', async () => {
+  await assert.rejects(() => sessionKeyToOAuth('sk-ant-sid-unit-cookie', { proxyUrl: 'socks5h://127.0.0.1:1' }), {
+    code: 'oauth_vm_required',
   })
-  assert.equal(tok.access_token, 'sk-ant-oat01-token')
-  assert.deepEqual(
-    seen.map((r) => r.stage),
-    ['token', 'bootstrap'],
-  )
-})
-
-test('exchangeTokenViaCookieAuth reads streamed token responses', { skip: localAuthSkip }, async () => {
-  const seen = []
-  const tok = await exchangeTokenViaCookieAuth({
-    code: 'abc#state-1',
-    codeVerifier: 'ver',
-    proxyUrl: 'socks5h://127.0.0.1:1',
-    fetchImpl: makeStrictOAuthFetch(seen, { tokenOnly: true, tokenStream: true }),
-  })
-  assert.equal(tok.access_token, 'sk-ant-oat01-token')
-})
-
-test('exchangeTokenViaCookieAuth redacts failed token bodies', { skip: localAuthSkip }, async () => {
-  await assert.rejects(
-    () =>
-      exchangeTokenViaCookieAuth({
-        code: 'abc',
-        codeVerifier: 'ver',
-        proxyUrl: '',
-        fetchImpl: makeStrictOAuthFetch([], {
-          tokenOnly: true,
-          tokenStatus: 400,
-          tokenBody: { error: 'bad', access_token: 'sk-ant-oat01-SECRET' },
-        }),
-      }),
-    (e) => /\[redacted-token\]/.test(e.message) && !/SECRET/.test(e.message),
-  )
 })
 
 test('authorize 403 session freshness is not reported as Cloudflare', () => {
@@ -205,90 +93,3 @@ test('authorize_no_code is a 400 not Cloudflare', () => {
   assert.equal(payload.status, 400)
   assert.equal(payload.error.code, 'authorize_no_code')
 })
-
-function response(status, body, stream = false) {
-  const text = JSON.stringify(body)
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    ...(stream
-      ? {
-          body: (async function* () {
-            yield Buffer.from(text)
-          })(),
-        }
-      : { text: async () => text }),
-  }
-}
-
-function makeStrictOAuthFetch(seen, opts = {}) {
-  return async (url, init = {}) => {
-    const headers = init.headers || {}
-    if (url === 'https://claude.ai/api/organizations') {
-      seen.push({ stage: 'orgs' })
-      assert.equal(init.method, 'GET')
-      assert.match(headers.cookie || headers.Cookie || '', /sessionKey=sk-ant-sid01-testaaaaaaaa/)
-      assert.match(headers['user-agent'] || headers['User-Agent'] || '', /Chrome\/146\.0\.0\.0/)
-      return response(200, [{ uuid: 'org-sk', name: 'Team', raven_type: 'team' }])
-    }
-    if (url === 'https://platform.claude.com/v1/oauth/org-sk/authorize') {
-      seen.push({ stage: 'authorize' })
-      const body = JSON.parse(init.body)
-      assert.equal(init.method, 'POST')
-      assert.equal(headers['content-type'], 'application/json')
-      assert.match(headers.cookie || headers.Cookie || '', /sessionKey=sk-ant-sid01-testaaaaaaaa/)
-      assert.match(headers['user-agent'] || headers['User-Agent'] || '', /Chrome\/146\.0\.0\.0/)
-      assert.equal(body.response_type, 'code')
-      assert.equal(body.client_id, '9d1c250a-e61b-44d9-88ed-5944d1962f5e')
-      assert.equal(body.redirect_uri, REDIRECT_URI)
-      assert.equal(body.scope, FULL_OAUTH_SCOPE)
-      assert.equal(body.code_challenge_method, 'S256')
-      assert.ok(body.code_challenge)
-      assert.ok(body.state)
-      const status = opts.authorizeStatus || 200
-      if (status >= 400) return response(status, opts.authorizeBody || { error: 'authorize failed' })
-      return response(200, { redirect_uri: `${REDIRECT_URI}?code=auth-code&state=${body.state}` })
-    }
-    if (url === TOKEN_URL) {
-      seen.push({ stage: 'token' })
-      const body = JSON.parse(init.body)
-      assert.equal(init.method, 'POST')
-      assert.equal(headers['user-agent'] || headers['User-Agent'], TOKEN_UA)
-      assert.equal(headers['x-app'], 'cli')
-      assert.equal(body.grant_type, 'authorization_code')
-      assert.equal(body.redirect_uri, REDIRECT_URI)
-      assert.equal(body.client_id, '9d1c250a-e61b-44d9-88ed-5944d1962f5e')
-      assert.ok(body.code_verifier)
-      assert.equal(Object.prototype.hasOwnProperty.call(body, 'expires_in'), false)
-      const status = opts.tokenStatus || 200
-      if (status >= 400) return response(status, opts.tokenBody || { error: 'bad token' })
-      return response(
-        200,
-        {
-          access_token: 'sk-ant-oat01-token',
-          refresh_token: 'sk-ant-ort01-token',
-          expires_in: 3600,
-          scope: FULL_OAUTH_SCOPE,
-        },
-        opts.tokenStream === true,
-      )
-    }
-    if (url === BOOTSTRAP_URL) {
-      seen.push({ stage: 'bootstrap' })
-      assert.equal(init.method, 'GET')
-      assert.equal(headers['user-agent'], TOKEN_UA)
-      assert.equal(headers['x-app'], 'cli')
-      assert.equal(headers['anthropic-beta'], 'oauth-2025-04-20')
-      assert.equal(headers.authorization, 'Bearer sk-ant-oat01-token')
-      assert.doesNotMatch(url, /vscode/)
-      return response(200, {
-        oauth_account: {
-          account_uuid: 'acct-sk',
-          account_email: 'sk@example.com',
-          organization_uuid: 'org-sk',
-        },
-      })
-    }
-    throw new Error(`unexpected fetch ${url}`)
-  }
-}

@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
+  cachePrefixSessionCountsForTest,
   clearCachePrefixSessions,
   confirmCachePrefix,
   describeCacheContinuity,
@@ -70,6 +71,29 @@ test('an idle session past the longest TTL starts over', () => {
   clearCachePrefixSessions()
   track('s', body('p', 'u1'), 0)
   assert.deepEqual(track('s', body('other', 'u1'), 60 * 60_000), { turn: 1, break: null })
+})
+
+test('idle snapshots are dropped on the next write, not kept until the size limit', () => {
+  clearCachePrefixSessions()
+  track('old', body('p', 'u1'), 0)
+  track('recent', body('p', 'u1'), 30 * 60_000)
+  track('new', body('p', 'u1'), 60 * 60_000 + 1)
+  // `old` is past the longest cache TTL; its image floor lasts a day.
+  assert.deepEqual(cachePrefixSessionCountsForTest(), { sessions: 2, images: 3 })
+  track('later', body('p', 'u1'), 24 * 60 * 60_000 + 1)
+  assert.deepEqual(cachePrefixSessionCountsForTest(), { sessions: 1, images: 3 })
+  track('next day', body('p', 'u1'), 25 * 60 * 60_000 + 1)
+  assert.deepEqual(cachePrefixSessionCountsForTest(), { sessions: 1, images: 2 })
+})
+
+test('a session written again is not swept by its first write time', () => {
+  clearCachePrefixSessions()
+  track('a', body('p', 'u1'), 0)
+  track('b', body('p', 'u1'), 10 * 60_000)
+  track('a', body('p', 'u1', 'a1', 'u2'), 50 * 60_000)
+  track('c', body('p', 'u1'), 70 * 60_000)
+  assert.equal(cachePrefixSessionCountsForTest().sessions, 2)
+  assert.deepEqual(track('a', body('p', 'u1', 'a1', 'u2', 'a2', 'u3'), 71 * 60_000), { turn: 3, break: null })
 })
 
 test('inbound to outbound image edits are classified without storing bytes', () => {
@@ -328,6 +352,47 @@ function ompBody(shots, budget, tag = 't') {
 }
 
 const sentImages = (body) => body.messages.reduce((sum, message) => sum + messageImageCount(message), 0)
+
+test('caller message cache policy preserves image blocks and multiple markers during history edits', () => {
+  clearCachePrefixSessions()
+  const options = { preserveMessageCache: true }
+  const first = {
+    messages: Array.from({ length: 9 }, (_, i) => ({
+      role: i % 2 ? 'assistant' : 'user',
+      content: [{ type: 'text', text: `m${i}` }, ...(i % 2 ? [] : [png(i)])],
+    })),
+  }
+  first.messages[2].content[0].cache_control = { ...MARK }
+  first.messages[2].content[1].cache_control = { ...MARK }
+  first.messages[8].content[0].cache_control = { type: 'ephemeral' }
+  assert.equal(prepareCachePrefix('caller-images', first, 0, options).body, first)
+  confirmCachePrefix('caller-images', 0)
+  const next = structuredClone(first)
+  next.messages[0].content.pop()
+  const prepared = prepareCachePrefix('caller-images', next, 1, options)
+  assert.equal(prepared.body, next)
+  assert.equal(prepared.break.index, 0)
+  assert.equal(prepared.image_floor, undefined)
+  assert.equal(prepared.anchor, undefined)
+  confirmCachePrefix('caller-images', 1)
+  // Quota diagnostics must compare the same untrimmed history the caller sent.
+  assert.equal(peekCachePrefix('caller-images', next, 2).break, null)
+  assert.equal(peekCachePrefix('caller-images', next, 2).confirmed, true)
+})
+
+test('caller message cache policy bypasses an existing image floor across accounts', () => {
+  clearCachePrefixSessions()
+  const options = { imageKey: 'shared-images' }
+  for (let shots = 1; shots <= 8; shots++) prepareCachePrefix('gateway-images', ompBody(shots, 4), shots, options)
+  assert.ok(prepareCachePrefix('gateway-images', ompBody(8, 4), 9, options).image_floor > 0)
+  const inbound = ompBody(9, 4)
+  const prepared = prepareCachePrefix('caller-images', inbound, 10, { ...options, preserveMessageCache: true })
+  assert.equal(prepared.body, inbound)
+  assert.equal(prepared.image_floor, undefined)
+  assert.equal(peekCachePrefix('caller-images', inbound, 11).break, null)
+  // Switching back to generated markers can optimize future client drops.
+  assert.ok(prepareCachePrefix('gateway-images', ompBody(10, 4), 12, options).image_floor > 0)
+})
 
 test('oh-my-pi dropping its oldest image breaks the prefix once per half budget, not every turn', () => {
   clearCachePrefixSessions()

@@ -1,8 +1,11 @@
 import type { Vm, VmDetailPayload } from '@/types/panel-vm'
 import { telemetryEnabled } from '@/features/vm/telemetry-policy'
+import {
+  telemetryPolicyConfirmed,
+  telemetryStatusLabel,
+} from '@/features/vm/telemetry-status'
 
 export type LiveKey = 'live' | 'idle' | 'blocked' | 'parked' | 'unknown' | 'off'
-
 export const LIVE_ORDER: LiveKey[] = [
   'live',
   'idle',
@@ -11,56 +14,49 @@ export const LIVE_ORDER: LiveKey[] = [
   'unknown',
   'off',
 ]
-
 export type SlotState = {
   vm: Vm
   on: boolean
   live: LiveKey
   label: string
   probing: boolean
+  confirmed: boolean
 }
 
-/**
- * `on` is the seed bit. The sidecar process stays up even when worker.json has
- * telemetry disabled (no official identity), so a live process alone is not an upload.
- */
 export function slotState(
   vm: Vm,
   detail: { data?: VmDetailPayload; isPending: boolean } | undefined
 ): SlotState {
   const on = telemetryEnabled(vm.seed_policy)
   const observed = detail?.data?.kernel?.telemetry
-  const running = observed?.running
-  if (!on) {
-    return {
-      vm,
-      on,
-      live: 'off',
-      label:
-        running === true && observed?.enabled === true
-          ? '关 · 旁路仍在退出'
-          : '关',
-      probing: false,
-    }
-  }
-  if (vm.status !== 'running') {
-    return { vm, on, live: 'parked', label: '槽已停', probing: false }
+  const confirmed = telemetryPolicyConfirmed(observed, on)
+  const base = { vm, on, confirmed, probing: false }
+  if (observed?.state === 'unsupported') {
+    return { ...base, live: 'blocked', label: '此运行环境不支持' }
   }
   if (!detail || detail.isPending) {
-    return { vm, on, live: 'unknown', label: '探测中', probing: true }
+    return { ...base, live: 'unknown', label: '探测原生状态', probing: true }
   }
-  if (observed?.enabled === false) {
+  if (!observed) {
     return {
-      vm,
-      on,
-      live: 'blocked',
-      label: vm.node_id ? '无官方身份 · 集群槽' : '无官方身份',
-      probing: false,
+      ...base,
+      live: vm.status === 'stopped' ? 'parked' : 'unknown',
+      label: telemetryStatusLabel(observed, on),
     }
   }
-  if (running === true && observed?.enabled === true)
-    return { vm, on, live: 'live', label: '上传中', probing: false }
-  if (running === false)
-    return { vm, on, live: 'idle', label: '进程未运行', probing: false }
-  return { vm, on, live: 'unknown', label: '状态未知', probing: false }
+  if (!confirmed)
+    return {
+      ...base,
+      live: 'unknown',
+      label: telemetryStatusLabel(observed, on),
+    }
+  if (!on)
+    return { ...base, live: 'off', label: telemetryStatusLabel(observed, on) }
+  const live =
+    observed.state === 'uploading'
+      ? 'live'
+      : observed.state === 'idle'
+        ? 'idle'
+        : 'blocked'
+  return { ...base, live, label: telemetryStatusLabel(observed, on) }
 }

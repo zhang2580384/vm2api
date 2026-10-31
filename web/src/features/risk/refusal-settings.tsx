@@ -256,9 +256,20 @@ export function RefusalSettings() {
                   className='flex items-center justify-between gap-2 px-3 py-2'
                 >
                   <div className='min-w-0 flex-1'>
-                    <p className='truncate text-sm'>
+                    <p
+                      className='line-clamp-3 text-sm break-words'
+                      title={item.preview || undefined}
+                    >
                       {item.preview || '（无预览）'}
                     </p>
+                    {item.error_message ? (
+                      <p
+                        className='line-clamp-2 text-xs break-words text-muted-foreground'
+                        title={item.error_message}
+                      >
+                        {item.error_message}
+                      </p>
+                    ) : null}
                     <p className='truncate font-mono text-xs text-muted-foreground tabular-nums'>
                       {item.model || '—'} · {shortFp(item.fingerprint)} · 命中{' '}
                       {item.hit_count} · {fmtExpiresAt(item.last_seen_at)}

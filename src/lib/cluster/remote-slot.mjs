@@ -33,8 +33,8 @@ import { REMOTE_KERNEL_ENTRY, resolveKernelDataplane } from '../vm/slot-engine.m
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { isKvmRuntime, runtimeKind } from '../vm/runtime-kind.mjs'
-import { slotMemory, slotDockerCpus, memoryMiB, normalizeVmConfig, VM_CONFIG_DEFAULTS } from '../vm/machine-spec.mjs'
-import { logTelemetryContainerSkip, telemetryContainerSkip } from '../vm/docker-container.mjs'
+import { slotMemory, slotDockerCpus, memoryMiB, normalizeVmConfig } from '../vm/machine-spec.mjs'
+import { dockerEnvMap, ensureKvmMachineRecord, kvmEnvMapIncomplete, kvmMachineFields } from '../vm/kvm-machine.mjs'
 import { slotExecArgv, slotExecCmd } from '../vm/slot-exec.mjs'
 import {
   CODEX_SLOT_ROLE,
@@ -82,7 +82,7 @@ import {
   remoteSlotPath,
   removeRemoteSlotDir,
 } from './remote-slot-files.mjs'
-import { REMOTE_WORKER_BIN, slotImageSpec } from './slot-image.mjs'
+import { slotImageSpec } from './slot-image.mjs'
 
 /** Bump when the slot's mount layout changes; a running container with an older label is recreated. */
 const SLOT_LAYOUT = '3'
@@ -623,27 +623,6 @@ async function probeRemoteAccel(session, routing) {
   }
 }
 
-function kvmMachineFields(vm) {
-  const m = vm.machine && typeof vm.machine === 'object' ? vm.machine : {}
-  const smbios = m.smbios && typeof m.smbios === 'object' ? m.smbios : {}
-  const d = VM_CONFIG_DEFAULTS
-  return {
-    vcpus: Number.isInteger(m.vcpus) ? m.vcpus : d.vcpus,
-    disk_gb: Number.isInteger(m.disk_gb) ? m.disk_gb : d.disk_gb,
-    cpu_model: m.cpu_model || d.cpu_model,
-    mac: m.mac || '',
-    smbios: {
-      manufacturer: smbios.manufacturer || d.smbios.manufacturer,
-      product: smbios.product || d.smbios.product,
-      version: smbios.version || d.smbios.version,
-      family: smbios.family || d.smbios.family,
-      serial: smbios.serial || '',
-      uuid: smbios.uuid || '',
-    },
-    disk_serial: m.disk_serial || '',
-  }
-}
-
 function kvmSlotContainerBody(vm, { image, network, remoteDir, routing, accel, slotUser }) {
   const slotName = displayName(vm.id)
   const memStr = slotMemory(vm, routing)
@@ -830,14 +809,20 @@ async function ensureNodeSlotImage(session, nodeId, projectRoot, kernel, runtime
 }
 
 /**
- * Current control-plane payload (kernel, cli-node, cc-node, kin-worker telemetry)
+ * Current control-plane payload (kernel, cli-node, cc-node and OAuth helpers)
  * as a slot image on this node. Same bytes local slots bind-mount; a node only
  * sees them after the content-hashed image exists and the container is recreated.
  */
 export async function refreshNodeSlotPayload(
   vm,
   projectRoot,
-  { routing, recreate = true, startFn = startRemoteSlot } = {},
+  {
+    routing,
+    recreate = true,
+    startFn = startRemoteSlot,
+    sessionFor = nodeSession,
+    inspect = inspectContainerOrNull,
+  } = {},
 ) {
   const id = vm?.id
   const nodeId = vmNodeId(vm)
@@ -846,14 +831,30 @@ export async function refreshNodeSlotPayload(
   const kernel = vm.kernel && OS_CATALOG[vm.kernel] ? vm.kernel : 'ubuntu-24.04'
   const kind = runtimeKind(vm)
   try {
-    const session = await nodeSession(nodeId)
+    const session = await sessionFor(nodeId)
+    const running = recreate !== false && vm.status === 'running'
+    // Upgrade and the entrypoint auto-sync both land here: a slot already up on this payload stays up.
+    if (running) {
+      const ref = slotImageSpec(projectRoot, kernel, { runtime: kind }).ref
+      const info = await inspect(session.docker, vm.runtime?.container || containerName(id))
+      if (info?.State?.Running && info.Config?.Image === ref) {
+        return {
+          id,
+          node_id: nodeId,
+          ok: true,
+          image: ref,
+          kernel_changed: false,
+          restarted: false,
+          kernel: { ok: true, skipped: true, reason: 'unchanged' },
+        }
+      }
+    }
     const spec = await ensureNodeSlotImage(session, nodeId, projectRoot, kernel, kind)
     if (spec.fail) return { id, node_id: nodeId, ...spec.fail }
     if (kind === 'kvm') {
       const dockerSpec = await ensureNodeSlotImage(session, nodeId, projectRoot, kernel, 'docker')
       if (dockerSpec.fail) return { id, node_id: nodeId, ...dockerSpec.fail }
     }
-    const running = recreate !== false && vm.status === 'running'
     if (!running) {
       return {
         id,
@@ -958,7 +959,7 @@ export async function refreshClusterSlotPayloads(
   const groups = new Map()
   const items = []
   for (const vm of vms || []) {
-    // Codex inference is the host Codex kernel. The slot has no cli-node or Go telemetry.
+    // Codex inference is the host Codex kernel; this update targets Claude CLI payloads.
     if (isCodexVm(vm)) continue
     if (resolveKernelDataplane(vm, routing || {}) === 'crag' || vm?.dataplane === 'crag') {
       items.push({
@@ -1044,15 +1045,6 @@ export function codexRoleMatches(info, vm) {
   return isCodexVm(vm) ? role === CODEX_SLOT_ROLE : role !== CODEX_SLOT_ROLE
 }
 
-async function startRemoteTelemetry(docker, vm, name) {
-  const target = { ...vm, runtime: { ...(vm.runtime || {}), container: name, type: runtimeKind(vm) } }
-  const worker = isKvmRuntime(vm) ? '/opt/kin-payload/opt/kin-live/kin-worker' : REMOTE_WORKER_BIN
-  const { Cmd, User } = slotExecCmd(target, [worker, 'telemetry', '--config', '/run/kin/worker.json'], {
-    detach: true,
-  })
-  await execDetached(docker, name, Cmd, { user: User }).catch(() => {})
-}
-
 async function chownRemoteKvmBinds(session, name, vm) {
   if (!isKvmRuntime(vm)) return
   await runRemote(session.client, kvmBindChownArgv(name, vm).map(shellQuote).join(' '), { timeoutMs: 15_000 })
@@ -1079,6 +1071,13 @@ export async function startRemoteSlot(vm, projectRoot, { recreate = false, routi
     const name = containerName(vm.id)
     const relays = await clusterManager().ensureSlotRelays(nodeId, vm.id)
     let existing = await inspectContainerOrNull(session.docker, name)
+    if (kvm && existing) {
+      ensureKvmMachineRecord(vm, {
+        projectRoot,
+        containerEnv: dockerEnvMap(existing.Config?.Env),
+        persist: true,
+      })
+    }
     const matches =
       existing &&
       existing.Config?.Image === image &&
@@ -1109,7 +1108,8 @@ export async function startRemoteSlot(vm, projectRoot, { recreate = false, routi
       return { ok: true, action: 'already-running', runtime: vm.runtime }
     }
     let previousNetwork = null
-    if (existing && !matches) {
+    const envBroken = kvm && existing && kvmEnvMapIncomplete(dockerEnvMap(existing.Config?.Env), existing.Config?.Env)
+    if (existing && (!matches || envBroken)) {
       previousNetwork = existing.HostConfig?.NetworkMode
       await removeContainer(session.docker, name)
       existing = null
@@ -1137,7 +1137,6 @@ export async function startRemoteSlot(vm, projectRoot, { recreate = false, routi
     }
     await containerAction(session.docker, name, 'start')
     await chownRemoteKvmBinds(session, name, vm)
-    await startRemoteTelemetry(session.docker, vm, name)
     applyRuntime(vm, { ...common, info: await inspectContainerOrNull(session.docker, name) })
     return { ok: true, action, runtime: vm.runtime }
   } catch (err) {
@@ -1188,7 +1187,6 @@ export async function reloadRemoteSlot(vm, projectRoot, { routing } = {}) {
       await containerAction(session.docker, name, running ? 'restart' : 'start')
       await chownRemoteKvmBinds(session, name, vm)
     }
-    await startRemoteTelemetry(session.docker, vm, name)
     applyRuntime(vm, {
       nodeId,
       name,
@@ -1255,45 +1253,6 @@ export async function migrateRemoteServiceContainers(vm, projectRoot) {
     }
   } catch (err) {
     return failure(err, 'legacy_service_migration_failed')
-  }
-}
-
-export async function restartRemoteServices(vm, projectRoot, { telemetryEnabled } = {}) {
-  try {
-    const session = await nodeSession(vmNodeId(vm))
-    const remoteDir = remoteSlotDir(session.host, vm.id)
-    const slotDir = path.join(projectRoot, 'vms', vm.id)
-    const name = vm.runtime?.container || containerName(vm.id)
-    const slotInfo = await inspectContainerOrNull(session.docker, name)
-    if (!slotInfo) {
-      logTelemetryContainerSkip('fleet', vm.id, name)
-      return telemetryContainerSkip(name)
-    }
-    const migration = await migrateRemoteServiceContainers(vm, projectRoot)
-    if (!migration.ok) return migration
-    await pushSlotFiles(vm, slotDir, ['run', 'seed'], session)
-    const target = { ...vm, runtime: { ...(vm.runtime || {}), container: name, type: runtimeKind(vm) } }
-    const stop = 'pkill -TERM -x kin-worker 2>/dev/null || true'
-    await execDetached(session.docker, name, slotExecCmd(target, ['sh', '-c', stop]).Cmd, {
-      user: slotExecCmd(target, ['sh', '-c', stop]).User,
-    })
-    await new Promise((resolve) => setTimeout(resolve, 150))
-    if (telemetryEnabled === true) await startRemoteTelemetry(session.docker, vm, name)
-    const image = slotImageSpec(projectRoot, vm.kernel || 'ubuntu-24.04')
-    const egress = await ensureRemoteEgress(session, vm, {
-      imageRef: image.ref,
-      binaryDigest: migration.binary_digest,
-    })
-    if (!egress.ok) return { ok: false, error: egress.error, code: egress.code || 'egress_update_failed' }
-    return {
-      ok: true,
-      action: telemetryEnabled === true ? 'restarted' : 'stopped',
-      remote_dir: remoteDir,
-      binary_digest: migration.binary_digest,
-      migration: migration.migrated,
-    }
-  } catch (err) {
-    return failure(err, 'service_update_failed')
   }
 }
 

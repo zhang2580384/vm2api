@@ -1,8 +1,8 @@
 /**
  * Slot lifecycle on a macOS cluster node (`platform: 'darwin'`). Same return
  * contract as remote-slot's Docker lifecycle, but nothing here touches Docker:
- * the slot kernel and its telemetry sidecar are launchd services of the node's
- * SSH user, driven with `launchctl` over the node's SSH link.
+ * the slot kernel is a launchd service of the node's SSH user, driven with
+ * `launchctl` over the node's SSH link. Native VM telemetry is unsupported here.
  *
  * Node layout (SSH user's HOME, no sudo):
  *   <root>/native/<digest>/{kin-kernel,cli-node,cc-node,kin-worker}   payload, shared
@@ -10,7 +10,7 @@
  *   <root>/vms/<id>/claude        CLAUDE_CONFIG_DIR (credentials, settings)
  *   <root>/vms/<id>/run           kernel.json, worker.json, token, kernel/worker sockets
  *   <root>/vms/<id>/{logs,tmp}    service logs, TMPDIR
- *   <root>/vms/<id>/launchd       the two service plists
+ *   <root>/vms/<id>/launchd       the kernel service plist
  *
  * The plists stay inside the slot tree, not in ~/Library/LaunchAgents: launchd
  * must not load a second copy at login next to the one this module bootstraps.
@@ -22,7 +22,6 @@
  * network exit only (no SOCKS5 binding, no Codex, no crag).
  */
 
-import fs from 'node:fs'
 import path from 'node:path'
 import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mjs'
 import { isLocalEgressProxy } from '../vm/egress.mjs'
@@ -53,7 +52,7 @@ function failure(err, fallbackCode = 'native_slot_failed') {
 }
 
 export function nativeLabels(vmId) {
-  return { kernel: `${LABEL_PREFIX}.${vmId}.kernel`, telemetry: `${LABEL_PREFIX}.${vmId}.telemetry` }
+  return { kernel: `${LABEL_PREFIX}.${vmId}.kernel` }
 }
 
 /** Node-side paths of one slot; `payload` is the shared binaries directory of `digest`. */
@@ -131,7 +130,7 @@ function slotEnv(vm, p) {
   }
 }
 
-/** The two launchd jobs of a slot: `{ kernel, telemetry }`, each `{ label, path, body }`. */
+/** The slot kernel launchd job. macOS has no telemetry sender. */
 export function nativeServicePlists(vm, p) {
   const labels = nativeLabels(vm.id)
   const env = slotEnv(vm, p)
@@ -149,25 +148,8 @@ export function nativeServicePlists(vm, p) {
     StandardOutPath: `${p.logs}/kernel.log`,
     StandardErrorPath: `${p.logs}/kernel.log`,
   }
-  const telemetry = {
-    Label: labels.telemetry,
-    ProgramArguments: [`${p.payload}/kin-worker`, 'telemetry', '--config', `${p.run}/worker.json`],
-    ...common,
-    RunAtLoad: true,
-    // A clean exit (telemetry disabled, 4xx) stays down until the next start, like the docker exec sidecar.
-    KeepAlive: { SuccessfulExit: false },
-    ThrottleInterval: 60,
-    ExitTimeOut: 5,
-    StandardOutPath: `${p.logs}/telemetry.log`,
-    StandardErrorPath: `${p.logs}/telemetry.log`,
-  }
   return {
     kernel: { label: labels.kernel, path: `${p.launchd}/${labels.kernel}.plist`, body: renderPlist(kernel) },
-    telemetry: {
-      label: labels.telemetry,
-      path: `${p.launchd}/${labels.telemetry}.plist`,
-      body: renderPlist(telemetry),
-    },
   }
 }
 
@@ -354,24 +336,6 @@ function applyNativeRuntime(vm, { nodeId, session, p, digest, domain, relays, sl
   }
 }
 
-/** The sidecar job runs only while worker.json enables telemetry (the panel switch); off means not loaded. */
-function telemetryEnabled(slotDir) {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(slotDir, 'run', 'worker.json'), 'utf8')).telemetry?.enabled === true
-  } catch {
-    return false
-  }
-}
-
-async function applyTelemetry(c, { restart }) {
-  if (!telemetryEnabled(c.slotDir)) {
-    const status = await nativeServiceStatus(c.session, c.domain, c.plists.telemetry.label)
-    if (status.state !== 'missing') await bootout(c.session, c.domain, c.plists.telemetry.label)
-    return 'disabled'
-  }
-  return applyService(c.session, c.domain, c.plists.telemetry, { changed: c.changed.telemetry, restart })
-}
-
 async function configureSlot(vm, projectRoot, routing) {
   const blocked = nativeUnsupported(vm, routing)
   if (blocked) return { fail: blocked }
@@ -383,6 +347,10 @@ async function configureSlot(vm, projectRoot, routing) {
   const p = nativeSlotPaths(session.host.root, vm.id, payload.digest)
   assertSocketPaths(p)
   const domain = await launchdDomain(session)
+  // Retire the precisely owned legacy job; never kill unrelated OAuth workers.
+  const legacyTelemetry = `${LABEL_PREFIX}.${vm.id}.telemetry`
+  await bootout(session, domain, legacyTelemetry)
+  await runRemote(session.client, `rm -f ${shellQuote(`${p.launchd}/${legacyTelemetry}.plist`)}`)
   const slotDir = path.join(projectRoot, 'vms', vm.id)
   await prepareSlotTree(session, p)
   const relays = await clusterManager().ensureSlotRelays(nodeId, vm.id)
@@ -405,7 +373,6 @@ export async function startNativeSlot(vm, projectRoot, { recreate = false, routi
       changed: c.changed.kernel,
       restart: recreate,
     })
-    await applyTelemetry(c, { restart: recreate })
     const kernel = await nativeServiceStatus(c.session, c.domain, c.plists.kernel.label)
     applyNativeRuntime(vm, { ...c, kernel })
     const action = kernelAction === 'unchanged' ? 'already-running' : before.state === 'missing' ? 'created' : 'started'
@@ -415,14 +382,13 @@ export async function startNativeSlot(vm, projectRoot, { recreate = false, routi
   }
 }
 
-/** Twin of reloadRemoteSlot: republish config, bounce the kernel and the sidecar. */
+/** Twin of reloadRemoteSlot: republish config and bounce the kernel. */
 export async function reloadNativeSlot(vm, projectRoot, { routing } = {}) {
   try {
     const c = await configureSlot(vm, projectRoot, routing)
     if (c.fail) return c.fail
     const before = await nativeServiceStatus(c.session, c.domain, c.plists.kernel.label)
     await applyService(c.session, c.domain, c.plists.kernel, { changed: c.changed.kernel, restart: true })
-    await applyTelemetry(c, { restart: true })
     const kernel = await nativeServiceStatus(c.session, c.domain, c.plists.kernel.label)
     applyNativeRuntime(vm, { ...c, kernel })
     return { ok: true, action: before.state === 'running' ? 'reloaded' : 'started', runtime: vm.runtime }
@@ -437,7 +403,7 @@ export async function stopNativeSlot(vm) {
     const domain = await launchdDomain(session)
     const labels = nativeLabels(vm.id)
     const was = await nativeServiceStatus(session, domain, labels.kernel)
-    await bootout(session, domain, labels.telemetry)
+    await bootout(session, domain, `${LABEL_PREFIX}.${vm.id}.telemetry`)
     await bootout(session, domain, labels.kernel)
     if (vm.runtime) vm.runtime = { ...vm.runtime, pid: null, stopped: true }
     return { ok: true, action: was.state === 'missing' ? 'absent' : 'stopped', runtime: vm.runtime || null }
@@ -446,14 +412,14 @@ export async function stopNativeSlot(vm) {
   }
 }
 
-/** Explicit delete / factory reset: both jobs, the node-side slot tree and the local relays. */
+/** Explicit delete / factory reset: owned jobs, node-side slot tree and local relays. */
 export async function destroyNativeSlot(vm) {
   try {
     const session = await nativeSession(vm)
     const domain = await launchdDomain(session)
     const labels = nativeLabels(vm.id)
     const was = await nativeServiceStatus(session, domain, labels.kernel)
-    await bootout(session, domain, labels.telemetry)
+    await bootout(session, domain, `${LABEL_PREFIX}.${vm.id}.telemetry`)
     await bootout(session, domain, labels.kernel)
     await removeRemoteSlotDir(vm, session)
     await clusterManager().dropSlotRelays(vm.id)
@@ -526,42 +492,6 @@ export async function restartNativeKernel(vm, projectRoot, { routing } = {}) {
     return { ok: true, action: 'restarted' }
   } catch (err) {
     return failure(err)
-  }
-}
-
-/** true / false, or null when the node cannot be asked. */
-export async function nativeTelemetryRunning(vm) {
-  try {
-    const session = await nativeSession(vm)
-    const domain = await launchdDomain(session)
-    const status = await nativeServiceStatus(session, domain, nativeLabels(vm.id).telemetry)
-    return status.state === 'running'
-  } catch {
-    return null
-  }
-}
-
-/** Telemetry switch: enabled bounces (or loads) the sidecar job, disabled boots it out. */
-export async function restartNativeTelemetry(vm, { enabled } = {}) {
-  try {
-    const session = await nativeSession(vm)
-    const domain = await launchdDomain(session)
-    const labels = nativeLabels(vm.id)
-    if (enabled !== true) {
-      await bootout(session, domain, labels.telemetry)
-      return { ok: true, action: 'stopped' }
-    }
-    // Same as a Docker node: the sidecar reads worker.json, so publish the current one first.
-    const projectRoot = placementProjectRoot()
-    if (projectRoot) await pushSlotFiles(vm, path.join(projectRoot, 'vms', vm.id), ['run', 'seed'], session)
-    const svc = {
-      label: labels.telemetry,
-      path: `${remoteSlotDir(session.host, vm.id)}/launchd/${labels.telemetry}.plist`,
-    }
-    await applyService(session, domain, svc, { changed: false, restart: true })
-    return { ok: true, action: 'restarted' }
-  } catch (err) {
-    return failure(err, 'service_update_failed')
   }
 }
 

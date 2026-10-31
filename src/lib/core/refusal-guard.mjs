@@ -10,7 +10,8 @@ import { createHash } from 'node:crypto'
 import { isUsagePolicyErrorMessage, makeRefusalGuardError, REFUSAL_GUARD_MESSAGE } from './errors.mjs'
 import { extractPrompt, normalizeText } from './distill-detect.mjs'
 import { resolveInboundIdentity } from '../identity/identity-rewrite.mjs'
-import { encodeSignature, refusalSignature, refusalUserDocument } from './refusal-similarity.mjs'
+import { encodeSignature, refusalAskTurns, refusalSignature, refusalUserDocument } from './refusal-similarity.mjs'
+import { stripEnvironmentSection, stripReminders } from '../protocol/jev-prepare.mjs'
 
 export { REFUSAL_GUARD_MESSAGE }
 
@@ -55,12 +56,28 @@ export function refusalFingerprint(body = {}, inbound = body) {
   return createHash('sha256').update(JSON.stringify(payload)).digest('hex')
 }
 
-export function refusalPreview(body = {}, inbound = body) {
-  const prompt = extractPrompt(inbound, body)
-  return String(prompt.user || prompt.joined || '')
+function cleanAsk(text) {
+  return stripEnvironmentSection(stripReminders(String(text || '')))
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 240)
+}
+
+/** Latest user sentence. Shared reminders, environment, and tool payloads are not the ask. */
+export function refusalPreview(body = {}, inbound = body) {
+  const asks = refusalAskTurns(inbound, body).map(cleanAsk).filter(Boolean)
+  return (asks.at(-1) || '').slice(0, 240)
+}
+
+/**
+ * Near-match document. Exact SHA-256 still covers the full prompt.
+ * A shared Claude Code reminder must not cross the similarity line, and a
+ * short ask has no signature: only the exact fingerprint applies.
+ */
+export function refusalStrictDocument(inbound, body = inbound) {
+  return refusalUserDocument(inbound, body, {
+    includeToolResults: false,
+    clean: cleanAsk,
+  })
 }
 
 const CONTENT_POLICY_ERROR_CODES = new Set([
@@ -160,7 +177,7 @@ export function inboundRefusalDeviceId({ inbound, body, headers } = {}) {
 }
 
 export function refusalPromptSignature(inbound, body = inbound) {
-  return encodeSignature(refusalSignature(refusalUserDocument(inbound, body)))
+  return encodeSignature(refusalSignature(refusalStrictDocument(inbound, body)))
 }
 
 function flagOn(value) {
@@ -234,7 +251,7 @@ export function matchStoredRefusal({
   const exact = repo.get(fingerprint)
   if (exact) return { kind: 'exact', deviceId, fingerprint, row: exact }
   if (!similarityEnabled || typeof repo.nearest !== 'function') return null
-  const signature = refusalSignature(refusalUserDocument(inbound, body))
+  const signature = refusalSignature(refusalStrictDocument(inbound, body))
   if (!signature) return null
   const near = repo.nearest(signature, similarity)
   if (!near) return null

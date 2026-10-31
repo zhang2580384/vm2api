@@ -60,6 +60,18 @@ test('isClientStream follows Anthropic/OpenAI default: omitted stream is JSON', 
   assert.equal(isClientStream({ stream: false }, { accept: 'text/event-stream' }), false)
 })
 
+test('isClientStream streams an omitted stream only when Accept prefers SSE over JSON', () => {
+  // Claude Code 2.1.311+ auto-mode classifier: non-streaming body, mixed Accept, parses JSON.
+  assert.equal(isClientStream({}, { accept: 'application/json, text/event-stream' }), false)
+  assert.equal(isClientStream({}, { Accept: 'text/event-stream, application/json' }), false)
+  assert.equal(isClientStream({}, { accept: 'application/json;q=0.5, text/event-stream' }), true)
+  assert.equal(isClientStream({}, { accept: 'text/event-stream;q=0.5, application/json' }), false)
+  assert.equal(isClientStream({}, { accept: 'text/event-stream;q=0' }), false)
+  assert.equal(isClientStream({}, { accept: 'TEXT/EVENT-STREAM; charset=utf-8' }), true)
+  assert.equal(isClientStream({}, { accept: '*/*' }), false)
+  assert.equal(isClientStream({ stream: true }, { accept: 'application/json' }), true)
+})
+
 test('openai.chat convert copies stream:true onto Claude body', () => {
   const { claude } = toClaudeMessages('openai.chat', {
     model: MODEL,

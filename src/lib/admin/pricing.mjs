@@ -75,17 +75,19 @@ export function normalizeUsage(usage = {}) {
     extracted?.cache_write_tokens
   const web_search_requests = webSearchRequestsOf(usage)
   if (isOpenaiWireUsage(usage)) {
-    const read = n(cacheRead)
-    const write = n(cacheCreate)
+    const hasRead = cacheRead != null
+    const hasWrite = cacheCreate != null
+    const read = hasRead ? n(cacheRead) : 0
+    const write = hasWrite ? n(cacheCreate) : 0
     const inp = n(input)
     return {
       ...usage,
       input_tokens: Math.max(inp - read - write, 0),
       output_tokens: output,
-      cache_read_tokens: read,
-      cache_read_input_tokens: read,
-      cache_creation_tokens: write,
-      cache_creation_input_tokens: write,
+      cache_read_tokens: hasRead ? read : cacheRead,
+      cache_read_input_tokens: hasRead ? read : cacheRead,
+      cache_creation_tokens: hasWrite ? write : cacheCreate,
+      cache_creation_input_tokens: hasWrite ? write : cacheCreate,
       web_search_requests,
     }
   }

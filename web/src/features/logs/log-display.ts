@@ -98,14 +98,20 @@ export function formatShortDistance(date: Date, now: Date): string {
  * 有 5m/1h 明细就用明细；只有合计时按 `cacheTtlApplied` 归到一侧。
  */
 export function cacheWriteSplit(input: {
-  total: number
+  total: number | null
   fiveM: number
   oneH: number
   ttl: CacheTtlApplied
 }): { fiveM: number; oneH: number } {
   return {
-    fiveM: input.fiveM > 0 ? input.fiveM : input.ttl !== '1h' ? input.total : 0,
-    oneH: input.oneH > 0 ? input.oneH : input.ttl === '1h' ? input.total : 0,
+    fiveM:
+      input.fiveM > 0
+        ? input.fiveM
+        : input.ttl !== '1h'
+          ? (input.total ?? 0)
+          : 0,
+    oneH:
+      input.oneH > 0 ? input.oneH : input.ttl === '1h' ? (input.total ?? 0) : 0,
   }
 }
 
@@ -141,7 +147,9 @@ export function unitPricePerMillion(
 /** 实际缓存率 = 读取 / (输入 + 读取 + 写入)，0-1；无输入侧 token 返回 null。 */
 export function actualCacheRate(row: UsageLogRow): number | null {
   const total =
-    row.inputTokens + row.cacheReadInputTokens + row.cacheCreationInputTokens
+    row.inputTokens +
+    row.cacheReadInputTokens +
+    (row.cacheCreationInputTokens ?? 0)
   return total > 0 ? row.cacheReadInputTokens / total : null
 }
 
@@ -311,45 +319,106 @@ export function finalProviderName(row: UsageLogRow): string {
   return row.vmName || row.vmId || row.providerName || '未知'
 }
 
-/** 队列等待取首次尝试：后续尝试的 wait 只是重试间隔，不是排队。 */
+/** 首次尝试的实测队列等待。历史总调度时间不能当作排队。 */
 export function queueWaitMs(
   chain: readonly ProviderChainItem[]
 ): number | null {
-  const wait = chain[0]?.waitMs
+  const wait = chain[0]?.queueWaitMs
   return wait != null && wait >= 0 ? wait : null
 }
 
 // ---------- 延迟分解 ----------
 
 export type LatencySegment = {
-  key: 'wait' | 'ttft' | 'generation'
+  key:
+    | 'wait'
+    | 'scheduling'
+    | 'prefill'
+    | 'tokenWait'
+    | 'generation'
+    | 'finalization'
   label: string
   ms: number
   percent: number
   color: string
 }
 
+function measuredNonNeg(n: number | null | undefined): number | null {
+  return n != null && Number.isFinite(n) && n >= 0 ? n : null
+}
+
 /**
- * hub `LatencyBreakdownBar` 的三段，TTFB 段（vm2api 无数据）换成排队等待：
- * 等待 → 等待首 Token → 生成。首 token 越界整体放弃；等待越界只丢该段。
+ * 排队 → 上游响应等待（至 TTFB）→ 首 Token 等待（TTFB→TTFT）→ 内容输出 → 收尾。
+ * 生成段只用实测 `generationMs`，终点 = firstByteMs + generationMs；
+ * 缺窗口不把总耗时减 TTFT 当成生成。越界的排队只丢该段。
  */
 export function latencySegments(input: {
   waitMs: number | null
+  queueWaitMs?: number | null
+  schedulingMs?: number | null
+  firstByteMs: number | null
   ttftMs: number | null
+  generationMs: number | null
   durationMs: number | null
 }): LatencySegment[] | null {
-  const { ttftMs, durationMs } = input
-  if (ttftMs == null || durationMs == null) return null
-  if (ttftMs < 0 || durationMs <= 0 || ttftMs > durationMs) return null
-  const wait =
-    input.waitMs != null && input.waitMs >= 0 && input.waitMs <= ttftMs
-      ? input.waitMs
-      : 0
+  const durationMs = measuredNonNeg(input.durationMs)
+  if (durationMs == null || durationMs <= 0) return null
+
+  const firstByteMs = measuredNonNeg(input.firstByteMs)
+  const ttftMs = measuredNonNeg(input.ttftMs)
+  const generationMs = measuredNonNeg(input.generationMs)
+  const waitMs = measuredNonNeg(input.waitMs)
+
+  if (firstByteMs != null && firstByteMs > durationMs) return null
+  if (ttftMs != null && ttftMs > durationMs) return null
+  if (firstByteMs != null && ttftMs != null && ttftMs < firstByteMs) return null
+
+  const cap = firstByteMs ?? ttftMs
+  const wait = waitMs != null && cap != null && waitMs <= cap ? waitMs : 0
+  const queue = measuredNonNeg(input.queueWaitMs)
+  const scheduling = measuredNonNeg(input.schedulingMs)
+  const split =
+    queue != null && scheduling != null && queue + scheduling <= wait + 1
+  const prefill = firstByteMs != null ? firstByteMs - wait : 0
+  const tokenWait =
+    firstByteMs != null && ttftMs != null
+      ? ttftMs - firstByteMs
+      : firstByteMs == null && ttftMs != null
+        ? ttftMs - wait
+        : 0
+
+  let generation = 0
+  let finalization = 0
+  const windowMs =
+    generationMs != null && generationMs > 0 ? generationMs : null
+  if (firstByteMs != null && windowMs != null) {
+    const endMs = firstByteMs + windowMs
+    if (
+      endMs <= durationMs &&
+      (ttftMs == null || (ttftMs >= firstByteMs && ttftMs <= endMs))
+    ) {
+      const visibleStart = ttftMs != null ? ttftMs : firstByteMs
+      generation = endMs - visibleStart
+      finalization = durationMs - endMs
+    }
+  }
+
+  const generationLabel =
+    firstByteMs != null && ttftMs != null ? '内容输出' : '上游输出时间'
   const parts: Array<[LatencySegment['key'], string, number, string]> = [
-    ['wait', '排队等待', wait, 'bg-blue-500'],
-    ['ttft', '等待首 Token', ttftMs - wait, 'bg-violet-500'],
-    ['generation', '生成时间', durationMs - ttftMs, 'bg-emerald-500'],
+    ['scheduling', '调度处理', split ? scheduling : 0, 'bg-indigo-500'],
+    [
+      'wait',
+      split ? '排队等待' : '调度与排队（未拆分）',
+      split ? queue : wait,
+      'bg-blue-500',
+    ],
+    ['prefill', '上游响应等待', prefill, 'bg-sky-500'],
+    ['tokenWait', '首 Token 等待', tokenWait, 'bg-violet-500'],
+    ['generation', generationLabel, generation, 'bg-emerald-500'],
+    ['finalization', '收尾', finalization, 'bg-slate-400'],
   ]
+  if (parts.every(([, , ms]) => ms <= 0)) return null
   return parts.map(([key, label, ms, color]) => ({
     key,
     label,

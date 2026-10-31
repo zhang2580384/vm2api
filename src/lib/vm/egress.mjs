@@ -645,7 +645,8 @@ export async function startEgressProcess({
   if (!spawned.ok) return spawned
   // Native children already have a PID in our namespace. Host-network
   // wrappers need the listener PID; callers still perform passive readiness.
-  const realPid = commandPrefix('ss').length ? await waitForListenerPid(listenHost, tcpPort, cfgPath) : spawned.pid
+  const realPid =
+    tcpPort > 0 && commandPrefix('ss').length ? await waitForListenerPid(listenHost, tcpPort, cfgPath) : spawned.pid
   if (!realPid) return { ok: false, error: `kin-egress ${listenTcp} did not listen` }
   fs.writeFileSync(pidFile, String(realPid) + '\n', { mode: 0o600 })
   return { ok: true, pid: realPid, reused: false, configPath: cfgPath, listen_tcp: listenTcp }

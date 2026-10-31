@@ -81,7 +81,7 @@ export const PERSONA_TEMPLATE_VARS: [string, string][] = [
   ['billing_semi', '同 billing，但保证以分号结尾，供同一行继续拼接'],
   [
     'identity',
-    "官方身份句 You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+    "官方身份句 You are Claude Code, Anthropic's official CLI for Claude.",
   ],
   [
     'identity_cli',
@@ -158,7 +158,7 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
       },
       {
         id: 'identity',
-        note: '2.1.303 Agent SDK 身份句，不打缓存点',
+        note: '官方 CLI 身份句，不打缓存点',
         type: 'text',
         text: '{{identity}}',
       },
@@ -185,10 +185,10 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
       },
       {
         id: 'caller_system',
-        note: '第5段可选。只放顶层 system。空则丢弃',
+        note: '第三方 system。不进顶层 system，包成 <system-reminder> 放在第一条 user 最前面',
         drop_if_empty: true,
         type: 'text',
-        text: '{{caller_system}}',
+        text: '<system-reminder>\n{{caller_system}}\n</system-reminder>\n',
       },
     ],
     official_full: [
@@ -200,7 +200,7 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
       },
       {
         id: 'identity',
-        note: '2.1.303 Agent SDK 身份句，不打缓存点',
+        note: '官方 CLI 身份句，不打缓存点',
         type: 'text',
         text: '{{identity}}',
       },
@@ -249,7 +249,7 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
     zero: [
       {
         id: 'billing',
-        note: '0注入只留计费头，官方身份句放在 prompt_version',
+        note: '0注入计费头，官方身份句放在 prompt_version；调用方 system 另按原块保留',
         type: 'text',
         text: '{{billing_semi}} prompt_version=<{{identity}}>',
       },
@@ -505,7 +505,8 @@ export function personaHideEnabled(
   }
   const legacy = parsePersonaHides(compat?.persona_hides)
   if (legacy != null) return legacy
-  return blocks.some((block) => block.hide === true)
+  // Mirrors gateway personaHidesUsageFromRoutingFile: zero masks by preset, not by block hide flags.
+  return preset === 'zero' || blocks.some((block) => block.hide === true)
 }
 
 /** 写 `persona_hide_presets[preset]`；回到模板默认且服务端没存过时去掉，避免无意义的 dirty。 */
@@ -694,6 +695,57 @@ export function presetSeed<K extends string>(
 ): PersonaBlock[] {
   const own = defaults[key]
   return own && own.length ? own : defaults['official' as K]
+}
+
+/** Mirror the gateway's narrowly scoped migration of the saved 2.1.303 official default. */
+export function migrateLegacyOfficialTemplate(
+  preset: PersonaPreset,
+  blocks: readonly RawBlock[]
+): RawBlock[] {
+  if (preset !== 'official') return blocks as RawBlock[]
+  const legacy: RawBlock[] = [
+    ...DEFAULT_PERSONA_TEMPLATES.official
+      .filter((block) =>
+        [
+          'billing',
+          'identity',
+          'harness',
+          'dynamic_boundary',
+          'guidance',
+        ].includes(String(block.id))
+      )
+      .map((block) =>
+        block.id === 'identity' ? { ...block, text: '{{identity_cli}}' } : block
+      ),
+    ...['env', 'env_timezone', 'env_locale'].map((id) => ({
+      id,
+      role: 'system',
+      drop_if_empty: true,
+      type: 'text',
+      text: `{{${id === 'env' ? 'env_303' : id}}}`,
+    })),
+  ]
+  const shape = (value: RawBlock) => {
+    if (!value || typeof value !== 'object') return value
+    const { note: _note, ...block } = value
+    return block
+  }
+  const stable = (value: unknown) =>
+    JSON.stringify(value, (_key, item) =>
+      item && typeof item === 'object' && !Array.isArray(item)
+        ? Object.fromEntries(
+            Object.entries(item).sort(([a], [b]) => a.localeCompare(b))
+          )
+        : item
+    )
+  if (stable(blocks.map(shape)) !== stable(legacy.map(shape)))
+    return blocks as RawBlock[]
+  return [
+    ...blocks,
+    DEFAULT_PERSONA_TEMPLATES.official.find(
+      (block) => block.id === 'caller_system'
+    )!,
+  ]
 }
 
 /**
@@ -944,7 +996,8 @@ function withStandingSlot(
  */
 export function previewSystemBlocks(
   blocks: readonly RawBlock[],
-  vars: Record<string, string>
+  vars: Record<string, string>,
+  { preserveCallerSystem = false } = {}
 ): SystemPreviewBlock[] {
   const source = withStandingSlot(blocks, vars.agent_standing || '')
   const out: SystemPreviewBlock[] = []
@@ -971,6 +1024,22 @@ export function previewSystemBlocks(
       ttl: typeof cc.ttl === 'string' ? cc.ttl : '',
       scope: typeof cc.scope === 'string' ? cc.scope : '',
       placeholder: blank || text === EMPTY_BLOCK_TEXT,
+    })
+  }
+  if (
+    preserveCallerSystem &&
+    vars.caller_system?.trim() &&
+    !blocks.some((block) =>
+      extractTemplateVars(block.text).includes('caller_system')
+    )
+  ) {
+    out.push({
+      id: 'caller_system',
+      text: vars.caller_system,
+      hide: false,
+      ttl: '',
+      scope: '',
+      placeholder: false,
     })
   }
   return out

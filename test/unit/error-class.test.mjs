@@ -68,6 +68,32 @@ test('classifyRequestError maps known codes and statuses', () => {
   )
   assert.equal(
     classifyRequestError({
+      status: 400,
+      error_code: 'upstream_invalid_request',
+      error_message:
+        'API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy',
+    }).error_class,
+    'refusal',
+  )
+  assert.equal(
+    classifyRequestError({
+      status: 400,
+      error_code: 'upstream_invalid_request',
+      error_message: 'max_tokens: 1 is too small',
+    }).error_class,
+    'request',
+  )
+  assert.equal(
+    classifyRequestError({
+      status: 401,
+      error_code: 'upstream_auth_error',
+      vm_id: 'slot',
+      error_message: 'Usage Policy quoted inside an auth failure',
+    }).error_class,
+    'credential',
+  )
+  assert.equal(
+    classifyRequestError({
       status: 503,
       error_code: 'upstream_error',
       error_message: '服务器负载过高稍后重试',

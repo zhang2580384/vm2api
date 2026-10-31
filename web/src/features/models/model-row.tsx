@@ -165,6 +165,16 @@ export function ModelRow({
                   value={`${formatK(params.max_tokens_cap ?? 64000)}`}
                 />
                 <Metric label='Thinking' value={thinkingPolicyLabel(model)} />
+                <Metric
+                  label='缺省 effort'
+                  value={
+                    caps.supports_effort
+                      ? params.default_effort === 'off'
+                        ? '不补'
+                        : params.default_effort || 'high'
+                      : '上游不接受'
+                  }
+                />
               </div>
             )}
 
@@ -343,6 +353,31 @@ export function ModelRow({
                     </SelectContent>
                   </Select>
                 </EditorRow>
+                <EditorRow label='缺省 effort'>
+                  <Select
+                    value={params.default_effort || 'high'}
+                    onValueChange={(value) => onParam('default_effort', value)}
+                    disabled={!caps.supports_effort}
+                  >
+                    <SelectTrigger className='h-8 w-full sm:w-[220px]'>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value='off'>不补</SelectItem>
+                      <SelectItem value='low'>low</SelectItem>
+                      <SelectItem value='medium'>medium</SelectItem>
+                      <SelectItem value='high'>high</SelectItem>
+                      <SelectItem value='xhigh'>xhigh</SelectItem>
+                      <SelectItem value='max'>max</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </EditorRow>
+                {caps.supports_effort ? null : (
+                  <p className='text-xs leading-5 text-muted-foreground'>
+                    cli-node 目录可能写了缺省值，但该模型上游拒绝
+                    effort，所以这里不补。
+                  </p>
+                )}
               </Panel>
             ) : null}
           </section>

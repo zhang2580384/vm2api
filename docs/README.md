@@ -6,6 +6,8 @@
 - [API.md](API.md) — `/v1`
 - [RISK.md](RISK.md) — 封控拦截（蒸馏 → 硬正则 → 拒答缓存 → 决策模型 → 放行出站）
 - [PANEL_API.md](PANEL_API.md) — 管理台 API
+- [redaction/README.md](redaction/README.md) — Node 清洗阶段可启停脱敏插件与 Web 控制面板设计（尚未实施）
+- [ISSUE_BACKLOG.md](ISSUE_BACKLOG.md) — open issue 复核后暂不修复的清单（2026-10-28）
 - 抄本：[deploy/env.example](deploy/env.example) · [deploy/vm2api.service](deploy/vm2api.service)
 
 总览：[README](../README.md)。版本：[CHANGELOG.md](../CHANGELOG.md)

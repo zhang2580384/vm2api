@@ -27,6 +27,7 @@ const TIMEOUTS: [number, string][] = [
 ]
 
 const MEMORY: [string, string][] = [
+  ['250m', '250 MB'],
   ['500m', '500 MB（推荐）'],
   ['512m', '512 MB'],
   ['1g', '1 GB'],
@@ -37,7 +38,12 @@ const MEMORY: [string, string][] = [
 
 const BASIC: [string, string, string, boolean][] = [
   ['enabled', '换票后自动', '启用', true],
-  ['sync_telemetry', '同步遥测', '初装成功后开启', false],
+  [
+    'sync_telemetry',
+    '发布原生遥测策略',
+    '只同步已保存的 telemetry_disabled，不把环境变量 0 当成开启',
+    false,
+  ],
 ]
 
 const ADVANCED: [string, string, string][] = [
@@ -96,11 +102,12 @@ export function OfficialCcSettingsPane({
       </CardHeader>
       <CardContent className='space-y-3'>
         <p className='text-xs text-muted-foreground'>
-          这是槽位外面的初装配置。启用时每次换票都重新 wipe 再跑官方
-          hello，不是只写票。运输固定 Rust cli-hop，这里不能改成 HTTP。真正跑
-          CLI 的是数据面：默认 cli-node + kernel，也可切 cc-node + kernel 或
-          crag + cc-node。成功后按「同步遥测」写官方身份，并热更新槽内
-          worker.json。虚拟机页的种子开关不能单独打开 DNT 来对抗这份配置。
+          这是槽位的初装流程配置。启用后换票会执行官方 hello，保留已有 VM
+          身份、settings 与原生队列，不把重新授权当作新设备。运输固定 Rust
+          cli-hop，这里不能改成 HTTP；真正运行 CLI 的数据面仍按当前配置选择。
+          「发布原生遥测策略」只同步已保存的 telemetry_disabled，不读取
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC，不开启已关闭的遥测，不改写凭据，
+          也不为遥测重启 VM。hello、/usage、指纹和内存设置与这个开关无关。
         </p>
 
         <div className='divide-y'>

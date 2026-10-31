@@ -70,6 +70,21 @@ export type VmProxySnap = {
 
 export type InferenceEngine = 'auto' | 'go' | 'rust'
 
+export type VmTelemetryState = {
+  enabled: boolean
+  state:
+    | 'disabled'
+    | 'idle'
+    | 'waiting_credentials'
+    | 'waiting_egress'
+    | 'uploading'
+    | 'error'
+    | 'unsupported'
+  pending_events: number
+  last_upload_at: string | null
+  last_error: string | null
+}
+
 export type VmKernelHealth = {
   reachable?: boolean
   process_up?: boolean
@@ -84,17 +99,15 @@ export type VmKernelHealth = {
   proxy_ok?: boolean | null
   accounts?: number | null
   vm_id?: string | null
+  vm_telemetry?: boolean
+  telemetry_ready?: boolean
+  telemetry?: VmTelemetryState | null
 }
 export type VmKernelSnapshot = {
   credential_owner?: string | null
   credential_state?: string | null
   proxy_state?: string | null
-  telemetry?: {
-    enabled?: boolean | null
-    running?: boolean | null
-    process?: string | null
-    read_only?: boolean
-  } | null
+  telemetry?: VmTelemetryState | null
   process_topology?: {
     rust_pid1?: boolean
     go_worker_pid1?: boolean
@@ -646,6 +659,17 @@ export type VmDetailPayload = {
   [key: string]: unknown
 }
 
+export type VmSeedFileObservation = {
+  ok: boolean
+  source: 'local' | 'node'
+  files: {
+    settings_json: 'present' | 'missing' | 'error'
+    claude_setting: 'present' | 'missing' | 'error'
+    kin_seed: 'present' | 'missing' | 'error'
+  }
+  error?: string
+}
+
 /** `GET/PUT /api/panel/vms/:id/seed-settings` 剥壳后的 payload。不展示 `cli_home`。 */
 export type VmSeedSettings = {
   vm_id?: string
@@ -658,6 +682,22 @@ export type VmSeedSettings = {
   settings_json?: Record<string, unknown> | null
   claude_setting?: string | null
   kin_seed?: Record<string, unknown> | null
+  seed_files?: VmSeedFileObservation
+  telemetry_log?: string[]
+  telemetry_log_error?: string | null
+  saved?: boolean
+  published?: boolean
+  applied?: boolean
+  service?: {
+    ok?: boolean
+    wrote?: boolean
+    published?: boolean
+    applied?: boolean
+    supported?: boolean
+    state?: string
+    code?: string
+    error?: string
+  }
   [key: string]: unknown
 }
 

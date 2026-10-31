@@ -718,16 +718,18 @@ start_stack() {
 }
 
 refresh_slot_services() {
-  # The control-plane image carries the freshly built Go binaries. Publish them
-  # into persistent slot-bin mounts and restart only kin-worker/kin-egress.
+  # The control-plane image carries the fresh slot payload. The running server
+  # (the only process holding cluster links) syncs kernel/cli-node into local
+  # slots, moves node slots onto a rebuilt slot image, then restarts
+  # kin-worker/kin-egress everywhere.
   # A stale kin-egress can keep the old binary and its listen port after this
   # refresh. Leaving that as a warning reports the upgrade done while the old
   # exit is still serving traffic.
   if ! docker exec "$SERVICE_NAME" test -f /opt/vm2api/scripts/fleet-services.mjs >/dev/null 2>&1; then
-    err "控制面缺少 Go 服务刷新脚本，不能确认 kin-egress 已换到当前二进制"
+    err "控制面缺少槽刷新脚本，不能确认槽内二进制已换到当前版本"
     exit 1
   elif ! docker exec "$SERVICE_NAME" node /opt/vm2api/scripts/fleet-services.mjs; then
-    err "Go slot service refresh failed; VM containers were left untouched, but kin-egress may still be the previous binary"
+    err "槽内二进制刷新失败，见上方逐槽报告；失败的槽可能仍在跑旧的 cli-node / kin-egress"
     exit 1
   fi
 }

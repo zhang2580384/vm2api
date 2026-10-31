@@ -572,6 +572,8 @@ export class RequestLogStore {
       upstream_model: extra.upstream_model || null,
       model_mismatch: modelMismatch(extra.requested_model || extra.model, extra.upstream_model),
       first_token_ms: extra.first_token_ms ?? null,
+      first_byte_ms: extra.first_byte_ms ?? null,
+      generation_ms: extra.generation_ms ?? null,
       stop_reason: extra.stop_reason || usage.stop_reason || null,
       attempt_count: extra.attempt_count ?? null,
       final_state: extra.final_state || null,
@@ -582,6 +584,8 @@ export class RequestLogStore {
       inbound_device_id: sessionIdForLog(extra.inbound_device_id),
       // Gate verdict JSON from intercept-gate; the risk audit groups on it.
       intercept: extra.intercept ? String(extra.intercept).slice(0, 400) : null,
+      // Exact classifyJev payload.state. Context, not a span the model named.
+      jev_state: extra.jev_state ? String(extra.jev_state).slice(0, 64000) : null,
       image_model: extra.image_model || null,
       image_usage: extra.image_usage ? JSON.stringify(extra.image_usage) : null,
       image_input_tokens: imageTokenCount(extra.image_usage?.input_tokens),
@@ -592,6 +596,7 @@ export class RequestLogStore {
       group_id: extra.group_id ?? 1,
       rate_multiplier: Number.isFinite(Number(extra.rate_multiplier)) ? Number(extra.rate_multiplier) : 1,
       ...costColumnsForLog(billedUsage, extra.upstream_model || extra.model || extra.requested_model, extra),
+      upstream_service_tier: extra.upstream_service_tier || null,
     }
     // sub2api actual_cost: official cost × group rate multiplier (0 is a valid rate)
     if (summary.total_cost != null) {
@@ -840,6 +845,8 @@ const EXPORT_COLUMNS = [
   'api_key_presented',
   'duration_ms',
   'first_token_ms',
+  'first_byte_ms',
+  'generation_ms',
   'input_tokens',
   'output_tokens',
   'total_cost',

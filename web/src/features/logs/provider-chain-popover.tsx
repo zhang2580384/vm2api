@@ -119,9 +119,15 @@ function SingleAttempt({
                   {formatDuration(item.latencyMs)}
                 </span>
               ) : null}
-              {item.waitMs ? (
+              {item.queueWaitMs != null ? (
                 <span>
                   <span className='opacity-70'>排队 </span>
+                  {formatDuration(item.queueWaitMs)}
+                </span>
+              ) : null}
+              {item.waitMs ? (
+                <span>
+                  <span className='opacity-70'>调度总耗时 </span>
                   {formatDuration(item.waitMs)}
                 </span>
               ) : null}

@@ -1,6 +1,6 @@
 /**
- * Live / fixture verification for official-cc init → telemetry sync.
- * Fake keys and fake ~/.claude.json only. Never prints secrets.
+ * Local fixture verification for official-cc init → native policy publication.
+ * Fixtures never opt a VM in, generate activity, or claim runtime activation.
  * Usage (on the gateway host):
  *   node scripts/verify-init-telemetry-sync.mjs
  *   VERIFY_LIVE=1 node scripts/verify-init-telemetry-sync.mjs
@@ -10,7 +10,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { finalizeOfficialCcTelemetry, normalizeOfficialCcConfig } from '../src/lib/oauth/official-cc-bootstrap.mjs'
-import { NONESSENTIAL_TRAFFIC_ENV_KEY, TELEMETRY_KILL_ENV_KEYS } from '../src/lib/protocol/seed-policy.mjs'
+import { NONESSENTIAL_TRAFFIC_ENV_KEY } from '../src/lib/protocol/seed-policy.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const rootGuess = path.resolve(here, '..')
@@ -96,7 +96,11 @@ async function fixtureFinalize() {
       },
     }),
   )
-  fs.writeFileSync(path.join(runDir, 'worker.json'), JSON.stringify({ vm_id: vmId, proxy_required: false }))
+  const credential = '{"claudeAiOauth":{"accessToken":"fixture-only"}}'
+  const backlog = '{"events":[]}'
+  fs.writeFileSync(path.join(home, '.claude', 'credentials.json'), credential)
+  fs.mkdirSync(path.join(home, '.claude', 'telemetry'), { recursive: true })
+  fs.writeFileSync(path.join(home, '.claude', 'telemetry', 'queue.json'), backlog)
   const vmPath = path.join(root, 'vms', `${vmId}.json`)
   fs.writeFileSync(
     vmPath,
@@ -110,42 +114,32 @@ async function fixtureFinalize() {
       fingerprint: { device_id: 'slot-preset', session_id: 'sess-fake' },
     }),
   )
-  const out = await finalizeOfficialCcTelemetry(root, vmId, { reload: false })
+  const out = await finalizeOfficialCcTelemetry(root, vmId, { publish: false })
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-  const worker = JSON.parse(fs.readFileSync(path.join(runDir, 'worker.json'), 'utf8'))
+  const kernel = JSON.parse(fs.readFileSync(path.join(runDir, 'kernel.json'), 'utf8'))
   const settings = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'))
-  const leftoverKept = fs.existsSync(path.join(home, '.claude', '.claude.json'))
-  const killGone = TELEMETRY_KILL_ENV_KEYS.filter((k) => k !== NONESSENTIAL_TRAFFIC_ENV_KEY).every(
-    (k) => settings.env?.[k] == null,
+  const seed = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'kin-seed.json'), 'utf8'))
+  record('saved explicit opt-in retained', vm.seed_policy?.telemetry_disabled === false && out.enabled === true)
+  record('native routing configured without identity payload', !!kernel.telemetry && !kernel.telemetry.identity)
+  record('native seed retains explicit consent', seed.seed_policy?.telemetry_disabled === false)
+  record('fixture write is not publication or activation', out.wrote && !out.published && !out.applied)
+  record('native telemetry keeps other traffic disabled', settings.env?.[NONESSENTIAL_TRAFFIC_ENV_KEY] === '1')
+  record('controller fingerprint not overwritten', vm.fingerprint?.device_id === 'slot-preset')
+  record(
+    'native identity preserved',
+    JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8')).userID === USER &&
+      fs.existsSync(path.join(home, '.claude', '.claude.json')),
   )
   record(
-    'fake official IDs enable sidecar without docker reload',
-    out.enabled === true && out.official === true && out.reloaded === false,
+    'credentials preserved',
+    fs.readFileSync(path.join(home, '.claude', 'credentials.json'), 'utf8') === credential,
   )
   record(
-    'leftover seed flags cleared',
-    vm.seed_policy?.telemetry_disabled === false &&
-      vm.seed_policy?.disable_nonessential_traffic === true &&
-      vm.seed_policy?.grove_enabled === false &&
-      vm.seed_policy?.do_not_track === false,
+    'backlog preserved',
+    fs.readFileSync(path.join(home, '.claude', 'telemetry', 'queue.json'), 'utf8') === backlog,
   )
-  record(
-    'worker identity is official fake IDs',
-    worker.telemetry?.identity?.device_id === MACHINE &&
-      worker.telemetry?.identity?.user_id === USER &&
-      worker.telemetry?.identity?.source === 'official-cc-init',
-  )
-  record('kill-switch env deleted from settings.json', killGone)
-  record(
-    'telemetry on writes NONESSENTIAL=1 and grove_enabled false',
-    settings.env?.[NONESSENTIAL_TRAFFIC_ENV_KEY] === '1' && settings.grove_enabled === false,
-  )
-  record('leftover ~/.claude/.claude.json kept beside official home json', leftoverKept)
-  record(
-    'fingerprint overwritten by official machineID',
-    vm.fingerprint?.official_machine_id === MACHINE && vm.fingerprint?.device_id === MACHINE,
-  )
-  record('telemetry.touch written', fs.existsSync(path.join(runDir, 'telemetry.touch')))
+  record('no fabricated activity touch', !fs.existsSync(path.join(runDir, 'telemetry.touch')))
+  record('no Go telemetry config created', !fs.existsSync(path.join(runDir, 'worker.json')))
   fs.rmSync(root, { recursive: true, force: true })
 }
 
@@ -155,7 +149,6 @@ async function fixtureNoIdentity() {
   const runDir = path.join(root, 'vms', vmId, 'run')
   fs.mkdirSync(path.join(root, 'vms', vmId, 'cli-home', '.claude'), { recursive: true })
   fs.mkdirSync(runDir, { recursive: true })
-  fs.writeFileSync(path.join(runDir, 'worker.json'), JSON.stringify({ vm_id: vmId }))
   fs.writeFileSync(
     path.join(root, 'vms', `${vmId}.json`),
     JSON.stringify({
@@ -164,12 +157,13 @@ async function fixtureNoIdentity() {
       fingerprint: { device_id: 'slot-only' },
     }),
   )
-  const out = await finalizeOfficialCcTelemetry(root, vmId, { reload: false })
-  const worker = JSON.parse(fs.readFileSync(path.join(runDir, 'worker.json'), 'utf8'))
-  record(
-    'no official IDs keeps sidecar off',
-    out.enabled === false && out.official === false && worker.telemetry?.enabled === false,
-  )
+  const out = await finalizeOfficialCcTelemetry(root, vmId, { publish: false })
+  const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', `${vmId}.json`), 'utf8'))
+  const seed = JSON.parse(fs.readFileSync(path.join(root, 'vms', vmId, 'cli-home', '.claude', 'kin-seed.json'), 'utf8'))
+  record('initialization preserves saved opt-out', saved.seed_policy.telemetry_disabled === true && !out.enabled)
+  record('native seed remains disabled', seed.seed_policy.telemetry_disabled === true)
+  record('missing identity never invents one', out.official === false)
+  record('local write never claims applied', out.ok && !out.published && !out.applied)
   fs.rmSync(root, { recursive: true, force: true })
 }
 
@@ -177,13 +171,8 @@ function liveFiles() {
   const routingFile = path.join(projectRoot, 'src/config/routing.json')
   const routing = JSON.parse(fs.readFileSync(routingFile, 'utf8'))
   const occ = normalizeOfficialCcConfig(routing.official_cc)
-  record('routing.json sync_telemetry default on', occ.sync_telemetry === true)
-  const pane = path.join(projectRoot, 'web/src/features/settings/official-cc-pane.tsx')
-  const exists = fs.existsSync(pane)
-  const html = exists ? fs.readFileSync(pane, 'utf8') : ''
-  const htmlOk = exists && html.includes('occ-') && html.includes('同步遥测') && html.includes('sync_telemetry')
-  record(`Vite official-cc pane ${pane}`, htmlOk)
-  return htmlOk
+  record('routing.json telemetry publication is default off', occ.sync_telemetry === false)
+  return occ.sync_telemetry === false
 }
 
 async function liveMasterRead() {
@@ -209,15 +198,22 @@ async function liveMasterRead() {
   const body = await res.json().catch(() => ({}))
   const occ = body?.data?.official_cc || body?.official_cc || {}
   record(
-    'live GET /api/panel/routing sync_telemetry',
-    res.status === 200 && occ.sync_telemetry !== false,
+    'live GET /api/panel/routing keeps telemetry publication default off',
+    res.status === 200 && occ.sync_telemetry === false,
     `http ${res.status}`,
   )
 }
 
 const live = process.argv.includes('--live') || process.env.VERIFY_LIVE === '1'
-await fixtureFinalize()
-await fixtureNoIdentity()
+const previousRunRoot = process.env.KIN_SLOT_RUN_ROOT
+try {
+  delete process.env.KIN_SLOT_RUN_ROOT
+  await fixtureFinalize()
+  await fixtureNoIdentity()
+} finally {
+  if (previousRunRoot === undefined) delete process.env.KIN_SLOT_RUN_ROOT
+  else process.env.KIN_SLOT_RUN_ROOT = previousRunRoot
+}
 liveFiles()
 if (live) {
   await liveHttp()

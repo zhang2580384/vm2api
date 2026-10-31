@@ -75,7 +75,7 @@ x-api-key: sk-vm-…
 | 钉槽（仅 master） | 虚拟机测试 loopback |
 | `X-Request-ID` | 原样回写响应头 |
 
-体大小上限由设置里的「请求体上限」决定（`failover.max_request_mib`，未设置时槽内 kernel 为 32 MiB）。网关进程天花板是 `KIN_MAX_BODY`（默认 128MB），面板值不能超过它。超限在选号之前返回 `413 body_too_large`；已经进槽、仍大于 kernel 缓冲的请求由 kernel 返回 413。改完保存后，各槽 kernel 在没有请求时重启一次才生效。
+体大小上限由设置里的「请求体上限」决定（`failover.max_request_mib`，未设置时入口与槽内 kernel 均为 32 MiB）。网关进程天花板是 `KIN_MAX_BODY`（默认 128MB），面板值不能超过它。超限在选号之前返回 `413 body_too_large`；Codex 转发还会按包含 headers/session/request_id 的实际序列化 envelope 检查槽内限额；封装后超限或内核返回的纯文本 413 均报告 `413 body_too_large`。改完保存后，各槽 kernel 在没有请求时重启一次才生效。
 
 ## Messages
 
@@ -164,6 +164,10 @@ curl -sS http://127.0.0.1:8787/v1/chat/completions \
 `POST /v1/completions`：`prompt`（字符串或非空数组）必填，转成单条 user Messages。
 
 `POST /v1/responses`：`input` 或 `messages` 必填。回包 `usage.input_tokens_details` 带缓存明细。`stop_reason=refusal` 同样映射 content_filter。
+
+Codex HTTP 入口省略 `stream` 时，只有 `Accept` 对 `text/event-stream` 的偏好高于 `application/json`（按 q 值，同值算 JSON）才返回 SSE，否则返回 JSON；显式 `stream` 优先于 Accept。内部 kernel 仍使用 SSE，网关聚合后按入口返回 Responses 或 Chat/Completions JSON。入站 WebSocket 的事件格式不变。
+
+Codex 首事件等待使用 `KIN_UPSTREAM_TIMEOUT`（默认 600 秒），收到事件后按 `failover.stream_idle_timeout_ms` / `KIN_STREAM_IDLE_TIMEOUT` 检查空闲时间；持续传输的长流不按总时长截断。内核返回 `503 no_capacity` 且尚未输出时可在现有候选范围与尝试次数限制内换槽；请求体超限不换槽。
 
 ## 模型目录
 
@@ -318,6 +322,10 @@ curl -sS http://127.0.0.1:8787/health
 4. 内核不可达或 CLI 恢复已耗尽：Node watchdog 才重启容器，1 小时内最多 3 次，每次先等待 1 / 5 / 15 分钟。
 5. 容器恢复仍失败：停止自动重启，排除该 VM（粘性与诊断 pin 都不能绕过），经配置的通知渠道告警。观察到内核恢复健康后解除故障；运行中的 cc-node/crag 保留原有不重启例外。
 
+VM / 节点下线通知由「设置 → 通知」的 `notify.events.vm_down` 控制，默认开启，并遵循通知总开关及各通道开关。通知监控按 `notify.interval_sec`（默认 60 秒）读取调度器使用的节点 SSH 连通状态、watchdog 终止故障及 VM 运行状态；节点失联、内核恢复预算耗尽，或运行中的 VM 变为 stopped/dead/error 时，经已配置的 Telegram、企业微信群机器人及邮件通道发送 VM ID、节点 ID 和原因。它不额外发起模型推理探测。
+
+同一次下线只通知一次，不同 VM 不共享告警冷却；发送失败在后续检查中仅重试失败通道，VM 恢复、删除、进入人工停调或维护状态后取消待发告警。投递状态保存在内存中；控制面重启后重新建立基线，已失联的节点和内核终止故障会重新告警，原已停止的 VM 不补发。此事件独立于按凭证可用性判断的 `account_down`；额度冷却、人工停调、维护及未知运行状态不直接触发下线通知。
+
 内部 `/internal/health` 暴露 `healthy`、`unhealthy_reason`、`recovering`、`closed_slots`、`cli_restarts`、`ready_slots`、`cli_pid`。`ready_slots=0` 且 CLI 存活是忙，`recovering=true` 是内核自身恢复；二者都不是容器重启理由。旧字段 `wedged_slots` 已移除。
 
 
@@ -371,7 +379,7 @@ stateDiagram-v2
 - 排队保活（仅 Claude `stream: true`）：选席、同会话串行、失败重试都发生在上游尝试开始之前，这段时间原先不下发任何字节。Cloudflare 约 100 秒收不到响应会回 524。`failover.queue_keepalive_delay_ms`（默认 60 秒，上限 90 秒，也可用 `KIN_QUEUE_KEEPALIVE_DELAY`）过后开始写 SSE `event: ping`，间隔与 `stream_keepalive_ms` 相同，并一直持续到首个内容事件。延迟之内失败仍是 HTTP 429/529/503。一旦写出 ping，状态码不能再改，后续失败改为 SSE `event: error`（例如 `overloaded_error`）。同会话排队另有 `failover.session_queue_timeout_ms`（默认 15 分钟；`0` 表示不限制），超时按 529 `overloaded_error` 返回，不会和仍在跑的上一轮并发。Codex / OpenAI 路径不变。
 - 工具参数流式下发：`failover.eager_tool_streaming`（默认开，面板「重试与切号」开关；显式 `false` 关闭）。开启后给所有自定义工具加 `eager_input_streaming: true`（服务端工具不动），上游边生成边下发大参数，不再长时间静默。这与官方 Claude Code 开启细粒度工具流式时的形态一致：官方只在直连官方 base URL 且服务端开关 `tengu_fgts` 打开，或设置 `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1` 时给全部工具加这个字段，所以经中转的客户端默认不带。客户端自己带了这个布尔值时以客户端为准。参数在 `max_tokens` 截断时可能是不完整的 JSON。OpenAI chat/responses 入口的 function 工具在转成 Anthropic 后同样加这个字段。
 - 子请求：带显式 `parent_session_id` / `root_session_id` 且父会话在本地已有绑定时，子请求跟随父会话所在 VM（family 粘性）。子会话有自己的 session id，单独占一个席位，不和父会话或同 device 的其它会话共用。没有显式父子字段时，同设备的新会话不会被当作子请求。
-- Claude Code 子 agent：请求头带 `x-claude-code-agent-id` 时，按上一条的子请求处理，父会话是 `metadata.user_id.session_id`，子会话 ID 由它和 agent ID 派生。每个 agent 单独串行，不等父会话当前这一轮。
+- Claude Code 子 agent：请求头带 `x-claude-code-agent-id` 时，按上一条的子请求处理，父会话是 `metadata.user_id.session_id`，子会话 ID 由它和 agent ID 派生。每个 agent 单独串行，不等父会话当前这一轮。官方入站若带 `x-claude-code-agent-id` 或 `x-claude-code-parent-agent-id`，出站原样保留该值；没有则不添加，也不写入槽位头文件。非官方入站不转发这两个头。
 - 裸 429（没有 5h/7d 头、没有套餐文案）不按模型名定范围：当前执行单元短暂让位并触发一次 `/usage` 探测，由真实用量决定是否是账号额度。上游文本点名模型的才按模型冷却，每分钟限流按 RPM 短冷却。
 
 ## 用量回包

@@ -6,7 +6,9 @@ export function configuredIpv6Enabled() {
   return isDbOpen() && new SettingsRepo(getDb()).get('proxy_pool_config')?.ipv6_enabled === true
 }
 
-export function proxyBlockedReason(proxy, ipv6Enabled = configuredIpv6Enabled()) {
+export function proxyBlockedReason(proxy, ipv6Enabled = undefined) {
+  if (socksProxyFamily(proxy) !== 6) return null
+  if (ipv6Enabled === undefined) ipv6Enabled = configuredIpv6Enabled()
   return ipv6Enabled !== true && socksProxyFamily(proxy) === 6 ? 'ipv6_disabled' : null
 }
 

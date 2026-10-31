@@ -54,7 +54,7 @@ import { proxyHealthOf } from '@/features/vm/proxy-health'
 import { RuntimeChip } from '@/features/vm/runtime-chip'
 import { VmMemoryBlock } from '@/features/vm/vm-memory-block'
 import { VmSchedulingBlock } from '@/features/vm/vm-scheduling'
-import { telemetryView } from './telemetry-policy'
+import { telemetryEnabled } from './telemetry-policy'
 import { telemetryStatusLabel } from './telemetry-status'
 
 type Props = {
@@ -226,7 +226,7 @@ export function VmStatusBoard(props: Props) {
       : live5
   const spend7 = formatWindowSpend(cost7, vm.estimate_7d)
   const spendFable = formatWindowSpend(fableCost, vm.estimate_fable)
-  const telemetry = telemetryView(vm.seed_policy, kernel?.telemetry)
+  const telemetry = kernel?.telemetry
   const topology = kernel?.process_topology
   const rust = wrapHealthLabel(kernel?.rust_health)
 
@@ -457,7 +457,10 @@ export function VmStatusBoard(props: Props) {
                   {topology?.go_telemetry ? ' · Go telemetry' : ''}
                 </Field>
                 <Field label='遥测' compact>
-                  {telemetryStatusLabel(telemetry)}
+                  {telemetryStatusLabel(
+                    telemetry,
+                    telemetryEnabled(vm.seed_policy)
+                  )}
                 </Field>
               </>
             )}

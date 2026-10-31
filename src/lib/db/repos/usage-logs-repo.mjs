@@ -96,6 +96,8 @@ const SUMMARY_COLUMNS = [
   'upstream_model',
   'model_mismatch',
   'first_token_ms',
+  'first_byte_ms',
+  'generation_ms',
   'stop_reason',
   'attempt_count',
   'final_state',
@@ -115,6 +117,7 @@ const SUMMARY_COLUMNS = [
   'actual_cost',
   'rate_multiplier',
   'service_tier',
+  'upstream_service_tier',
   'speed',
   'long_context',
   'session_id',
@@ -122,6 +125,7 @@ const SUMMARY_COLUMNS = [
   'reasoning_effort',
   'inbound_device_id',
   'intercept',
+  'jev_state',
   'vm_owner_user_id',
   'image_model',
   'image_usage',
@@ -136,6 +140,7 @@ function toRow(rec) {
     if (c === 'ip_address') return rec.ip_address ?? rec.ip ?? null
     if (c === 'stream') return rec.stream ? 1 : 0
     if (c === 'has_tools') return rec.has_tools == null ? null : rec.has_tools ? 1 : 0
+    if (c === 'cache_creation_tokens' && rec[c] == null) return null
     if (
       c === 'input_tokens' ||
       c === 'output_tokens' ||

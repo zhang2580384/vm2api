@@ -29,6 +29,8 @@ function rowToAttempt(row) {
     terminal_state: row.terminal_state,
     usage: parse(row.usage_json),
     wait_ms: row.wait_ms,
+    queue_wait_ms: row.queue_wait_ms,
+    scheduling_ms: row.scheduling_ms,
     ttft_ms: row.ttft_ms,
     latency_ms: row.latency_ms,
   }
@@ -42,8 +44,8 @@ export class RequestAttemptsRepo {
         request_id, attempt_no, vm_id, account_id, model, selection_reason,
         started_at, completed_at, upstream_status, error_scope, action,
         cooldown_until, downstream_committed, terminal_state, usage_json,
-        wait_ms, ttft_ms, latency_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        wait_ms, ttft_ms, latency_ms, queue_wait_ms, scheduling_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     this._complete = db.prepare(`
       UPDATE request_attempts SET
@@ -60,7 +62,17 @@ export class RequestAttemptsRepo {
     `)
   }
 
-  begin({ requestId, attemptNo, vmId, accountId, model, selectionReason, waitMs = 0 }) {
+  begin({
+    requestId,
+    attemptNo,
+    vmId,
+    accountId,
+    model,
+    selectionReason,
+    waitMs = 0,
+    queueWaitMs = null,
+    schedulingMs = null,
+  }) {
     const startedAt = new Date().toISOString()
     this._insert.run(
       requestId,
@@ -81,6 +93,8 @@ export class RequestAttemptsRepo {
       waitMs ?? 0,
       null,
       null,
+      queueWaitMs,
+      schedulingMs,
     )
     return this.list(requestId).find((item) => item.attempt_no === attemptNo) || null
   }

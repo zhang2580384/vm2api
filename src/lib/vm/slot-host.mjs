@@ -23,7 +23,9 @@
  *   queueSyncRun(vm, slotDir)   fire-and-forget syncRun
  *   onImport(vm, slotDir)       an imported credential replaces the slot's copy
  *   afterRefresh(vm, slotDir)   the slot rotated its credential; mirror it back
- *   touch(vm, slotDir)          telemetry activity mark
+ *   syncTelemetry(vm, slotDir)  acknowledge run/seed publication for VM-native telemetry
+ *   seedFiles(vm, slotDir)      read owner seed bytes plus actual HOME; null means missing, errors never fall back
+ *   syncSeed(vm, slotDir)       acknowledge all three seed files without claiming native telemetry support
  *
  * A node may be a Mac (`platform: 'darwin'`): its slots are launchd services,
  * not containers. That host is `native: true`, has no Docker (dockerApi /
@@ -32,14 +34,16 @@
  *   observe(vm)                 watchdog state of the kernel job
  *   inspect(vm)                 recovery-panel view (same shape as a container inspect)
  *   restartKernel(vm, root)     bounce or (re)load the kernel job
- *   telemetryRunning(vm)        sidecar job state
- *   restartTelemetry(vm, opts)  sidecar on/off
  *
  * Functions are wrapped, not referenced: this module sits in an import cycle
  * with vm-runtime / the kernel supervisor, so bindings are read at call time.
  */
 
 import { localDocker } from '../cluster/docker-remote.mjs'
+import fs from 'node:fs'
+import path from 'node:path'
+import { nodeSession, remoteSlotDir } from '../cluster/placement.mjs'
+import { readRemoteFileNoFollow } from '../cluster/remote-fs.mjs'
 import {
   clusterManager,
   isNativeNodeVm,
@@ -52,11 +56,9 @@ import {
   destroyNativeSlot,
   inspectNativeSlot,
   nativeSlotPaths,
-  nativeTelemetryRunning,
   observeNativeSlot,
   reloadNativeSlot,
   restartNativeKernel,
-  restartNativeTelemetry,
   startNativeSlot,
   stopNativeSlot,
 } from '../cluster/native-slot.mjs'
@@ -65,7 +67,6 @@ import {
   pullSlotCredentials,
   pushSlotCredentials,
   pushSlotFiles,
-  pushTelemetryTouch,
   queueSlotPush,
 } from '../cluster/remote-slot-files.mjs'
 import {
@@ -94,6 +95,7 @@ import { isCodexVm } from './vm-kind.mjs'
 import { nodeEgressProxyUrl } from '../cluster/node-egress-socks.mjs'
 import { isKvmRuntime } from './runtime-kind.mjs'
 import { stopCodexKernel } from '../transport/codex-kernel-supervisor.mjs'
+import { readLocalSlotSeedFiles } from './slot-seed.mjs'
 
 const noop = async () => ({ skipped: true })
 
@@ -102,7 +104,11 @@ const LOCAL_HOST = Object.freeze({
   nodeId: null,
   bakedKernel: false,
   ownsSocketFiles: true,
-  bins: Object.freeze({ cli: CONTAINER_CLI_NODE_BIN, cc: CONTAINER_CC_NODE_BIN }),
+  bins: Object.freeze({
+    cli: CONTAINER_CLI_NODE_BIN,
+    cc: CONTAINER_CC_NODE_BIN,
+    oauthAuth: '/usr/local/bin/kin-oauth-auth',
+  }),
   supports: () => true,
   dockerEnv: () => undefined,
   dockerApi: () => localDocker(),
@@ -144,10 +150,50 @@ const LOCAL_HOST = Object.freeze({
   localExitProxyUrl: (vm) => (isCodexVm(vm) ? localEgressProxyUrl() : ''),
   // The container bind-mounts vms/<id>/ directly: every local write is already published.
   syncRun: noop,
+  seedFiles: async (_vm, slotDir) => ({
+    cli_home: path.join(slotDir, 'cli-home'),
+    files: readLocalSlotSeedFiles(slotDir),
+  }),
+  syncSeed: async (_vm, slotDir) => {
+    const files = readLocalSlotSeedFiles(slotDir)
+    if (Object.values(files).some((value) => value === null)) {
+      throw new ClusterError(502, 'seed_publish_failed', 'VM seed files are missing')
+    }
+    return { published: true }
+  },
+  syncTelemetry: async (vm, slotDir) => {
+    const files = readLocalSlotSeedFiles(slotDir)
+    if (Object.values(files).some((value) => value === null)) {
+      throw new ClusterError(502, 'telemetry_publish_failed', 'VM seed files are missing')
+    }
+    const config = path.join(vm.runtime?.worker_run_dir || path.join(slotDir, 'run'), 'kernel.json')
+    const fd = fs.openSync(config, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK)
+    try {
+      if (!fs.fstatSync(fd).isFile())
+        throw new ClusterError(502, 'telemetry_publish_failed', 'VM kernel config is unavailable')
+    } finally {
+      fs.closeSync(fd)
+    }
+    return { published: true }
+  },
+  telemetryLog: async (vm, slotDir) => {
+    const file = path.join(vm.runtime?.worker_run_dir || path.join(slotDir, 'run'), 'telemetry-upload.log')
+    try {
+      const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK)
+      try {
+        const stat = fs.fstatSync(fd)
+        return stat.isFile() && stat.size <= 65536 ? fs.readFileSync(fd, 'utf8') : ''
+      } finally {
+        fs.closeSync(fd)
+      }
+    } catch (error) {
+      if (error.code === 'ENOENT') return ''
+      throw error
+    }
+  },
   queueSyncRun: () => null,
   onImport: noop,
   afterRefresh: noop,
-  touch: () => null,
 })
 
 function nodeHost(nodeId) {
@@ -156,7 +202,7 @@ function nodeHost(nodeId) {
     nodeId,
     bakedKernel: true,
     ownsSocketFiles: false,
-    bins: { cli: REMOTE_CLI_NODE_BIN, cc: REMOTE_CC_NODE_BIN },
+    bins: { cli: REMOTE_CLI_NODE_BIN, cc: REMOTE_CC_NODE_BIN, oauthAuth: '/usr/local/bin/kin-oauth-auth' },
     supports: (cap) => SLOT_CAPS_NODE.has(cap),
     dockerEnv: () => ({ ...process.env, DOCKER_HOST: `unix://${clusterManager().bridgeSocketPath(nodeId)}` }),
     dockerApi: () => clusterManager().docker(nodeId),
@@ -169,10 +215,57 @@ function nodeHost(nodeId) {
     setProxyEgressEnabled: (vm, projectRoot, enabled) => setRemoteProxyEgressEnabled(vm, projectRoot, enabled),
     localExitProxyUrl: () => nodeEgressProxyUrl(nodeId),
     syncRun: (vm, slotDir) => pushSlotFiles(vm, slotDir, ['run']),
+    seedFiles: async (vm) => {
+      const session = await nodeSession(nodeId)
+      const root = remoteSlotDir(session.host, vm.id)
+      const files = {}
+      for (const name of ['settings.json', 'claude.setting', 'kin-seed.json']) {
+        const bytes = await readRemoteFileNoFollow(session.client, `${root}/claude/${name}`, {
+          maxBytes: (1 << 20) + 1,
+        })
+        if (bytes && bytes.length > 1 << 20)
+          throw new ClusterError(502, 'seed_file_too_large', 'VM seed file is too large')
+        files[name] = bytes === null ? null : bytes.toString('utf8')
+      }
+      return { cli_home: `${root}/cli-home`, files }
+    },
+    syncSeed: async (vm, slotDir) => {
+      const result = await pushSlotFiles(vm, slotDir, ['seed_settings'])
+      if (
+        !['settings.json', 'claude.setting', 'kin-seed.json'].every((name) =>
+          result.pushed.includes(`cli-home/.claude/${name}`),
+        )
+      ) {
+        throw new ClusterError(502, 'seed_publish_failed', 'VM seed configuration was not published')
+      }
+      return { ...result, published: true }
+    },
+    syncTelemetry: async (vm, slotDir) => {
+      const result = await pushSlotFiles(vm, slotDir, ['telemetry'])
+      if (
+        ![
+          'run/kernel.json',
+          'cli-home/.claude/settings.json',
+          'cli-home/.claude/claude.setting',
+          'cli-home/.claude/kin-seed.json',
+        ].every((file) => result.pushed.includes(file))
+      ) {
+        throw new ClusterError(502, 'telemetry_publish_failed', 'VM telemetry configuration was not published')
+      }
+      return { ...result, published: true }
+    },
+    telemetryLog: async (vm) => {
+      const session = await nodeSession(nodeId)
+      const bytes = await readRemoteFileNoFollow(
+        session.client,
+        `${remoteSlotDir(session.host, vm.id)}/run/telemetry-upload.log`,
+        { maxBytes: 65536 },
+      )
+      return bytes?.toString('utf8') || ''
+    },
     queueSyncRun: (vm, slotDir) => queueSlotPush(vm, slotDir, ['run']),
     onImport: (vm, slotDir) => pushSlotCredentials(vm, slotDir),
     afterRefresh: (vm, slotDir) => pullSlotCredentials(vm, slotDir),
-    touch: (vm, slotDir) => pushTelemetryTouch(vm, slotDir),
   }
 }
 
@@ -212,6 +305,7 @@ function nativeHost(nodeId, record) {
     dockerEnv: unsupported('容器命令'),
     dockerApi: unsupported('容器命令'),
     execUser: unsupported('容器命令'),
+    syncTelemetry: unsupported('VM 原生遥测'),
     start: (vm, projectRoot, opts) => startNativeSlot(vm, projectRoot, opts),
     reload: (vm, projectRoot, opts) => reloadNativeSlot(vm, projectRoot, opts),
     stop: (vm) => stopNativeSlot(vm),
@@ -224,8 +318,6 @@ function nativeHost(nodeId, record) {
     observe: (vm) => observeNativeSlot(vm),
     inspect: (vm) => inspectNativeSlot(vm),
     restartKernel: (vm, projectRoot, opts) => restartNativeKernel(vm, projectRoot, opts),
-    telemetryRunning: (vm) => nativeTelemetryRunning(vm),
-    restartTelemetry: (vm, opts) => restartNativeTelemetry(vm, opts),
   }
 }
 
@@ -235,7 +327,11 @@ export function slotHost(vm) {
   const base = nodeId ? nodeHost(nodeId) : LOCAL_HOST
   if (!isKvmRuntime(vm)) return base
   // Runner socat owns run/kernel.sock; deleting it severs the guest relay.
-  return { ...base, ownsSocketFiles: false }
+  return {
+    ...base,
+    bins: { ...base.bins, oauthAuth: '/opt/kin-payload/usr/local/bin/kin-oauth-auth' },
+    ownsSocketFiles: false,
+  }
 }
 
 /**

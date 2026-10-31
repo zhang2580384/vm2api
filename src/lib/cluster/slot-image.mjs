@@ -80,6 +80,9 @@ export function slotPayload(projectRoot) {
   const worker = binOr('KIN_CLUSTER_WORKER_BIN', binOr('KIN_WORKER_BIN', path.join(projectRoot, 'bin', 'kin-worker')))
   requireElf(worker, 'kin-worker')
   files.push({ name: 'usr/local/bin/kin-worker', src: worker, mode: 0o755 })
+  const oauth = binOr('KIN_OAUTH_AUTH_BIN', path.join(projectRoot, 'bin', 'kin-oauth-auth'))
+  requireElf(oauth, 'kin-oauth-auth')
+  files.push({ name: 'usr/local/bin/kin-oauth-auth', src: oauth, mode: 0o755 })
   const egress = binOr(
     'KIN_CLUSTER_EGRESS_BIN',
     fs.existsSync(EGRESS_BIN) ? EGRESS_BIN : path.join(projectRoot, 'bin', 'kin-egress'),

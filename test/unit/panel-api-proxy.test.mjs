@@ -216,16 +216,24 @@ test('vm detail exposes Go credential ownership and Rust kernel health', async (
   })
 
   assert.equal(healthCalls, 1)
-  assert.deepEqual(detail.data.kernel, {
-    telemetry: { enabled: null, running: null },
-    process_topology: null,
-    credential_owner: 'go',
-    configured_engine: 'rust',
-    resolved_engine: 'rust',
-    active_engine: 'rust',
-    go_health: { reachable: true, status: 200, worker_version: 'go-1.0.0' },
-    rust_health: { reachable: true, status: 200, worker_version: 'rust-0.1.0' },
-  })
+  assert.deepEqual(
+    {
+      credential_owner: detail.data.kernel.credential_owner,
+      configured_engine: detail.data.kernel.configured_engine,
+      resolved_engine: detail.data.kernel.resolved_engine,
+      active_engine: detail.data.kernel.active_engine,
+      go_health: detail.data.kernel.go_health,
+      rust_health: detail.data.kernel.rust_health,
+    },
+    {
+      credential_owner: 'go',
+      configured_engine: 'rust',
+      resolved_engine: 'rust',
+      active_engine: 'rust',
+      go_health: { reachable: true, status: 200, worker_version: 'go-1.0.0' },
+      rust_health: { reachable: true, status: 200, worker_version: 'rust-0.1.0' },
+    },
+  )
 })
 
 test('vm detail rust-only health does not fall back to go', async () => {

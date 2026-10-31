@@ -61,6 +61,8 @@ jobs:
         run: |
           node scripts/fetch-payload.mjs
           node scripts/fetch-payload.mjs --check
+      - name: native CLI packaging unit tests
+        run: python3 -m unittest discover -s test/deploy -p test_native_cli.py -v
       - run: npm run test:unit
       - name: offline backup and cloud restore end-to-end
         run: node --test test/e2e/backup.e2e.test.mjs test/e2e/panel-proxy-domain-forward.e2e.test.mjs
@@ -89,3 +91,18 @@ jobs:
           pnpm format:check
           pnpm test
           pnpm build
+
+  arm64-native-cli:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: prepare pinned x86 kernel emulation
+        run: python3 deploy/prepare-arm64.py
+      - name: build native ARM control plane
+        run: docker build -f deploy/Dockerfile.arm64-control -t vm2api-native-cli-ci .
+      - name: offline large-body, concurrency and cancel regression
+        run: |
+          docker run --network none --cpus 2 --memory 3g --pids-limit 256 \
+            --entrypoint python3 -v "$PWD/test/deploy/smoke_native_cli.py:/smoke.py:ro" \
+            vm2api-native-cli-ci /smoke.py

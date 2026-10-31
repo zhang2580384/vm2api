@@ -5,6 +5,7 @@ import {
   OVERLAY_TEMPLATE_KEYS,
   PERSONA_PRESETS,
   parsePersonaTemplateLines,
+  migrateLegacyOfficialTemplate,
   presetSeed,
   stringifyPersonaTemplate,
   templateOrFollowPreset,
@@ -35,13 +36,18 @@ export function seedText<K extends string>(
 
 export function seedPersonaDrafts(compat: Compat): PersonaDrafts {
   const stored = compat.persona_templates
-  return {
+  const drafts = {
     official: seedText(stored, DEFAULT_PERSONA_TEMPLATES, 'official'),
     official_full: seedText(stored, DEFAULT_PERSONA_TEMPLATES, 'official_full'),
     zero: seedText(stored, DEFAULT_PERSONA_TEMPLATES, 'zero'),
     custom: seedText(stored, DEFAULT_PERSONA_TEMPLATES, 'custom'),
     official_303: seedText(stored, DEFAULT_PERSONA_TEMPLATES, 'official_303'),
   }
+  const { blocks } = parsePersonaTemplateLines(drafts.official)
+  drafts.official = stringifyPersonaTemplate(
+    migrateLegacyOfficialTemplate('official', blocks)
+  )
+  return drafts
 }
 
 export function seedOverlayDrafts(compat: Compat): OverlayDrafts {

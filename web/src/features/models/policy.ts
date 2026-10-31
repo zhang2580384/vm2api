@@ -7,6 +7,7 @@ export type ModelCaps = {
   context_window?: number
   supports_1m?: boolean
   supports_adaptive?: boolean
+  supports_effort?: boolean
   thinking_mode?: string
 }
 
@@ -16,6 +17,7 @@ export type ModelParams = {
   thinking_fallback_budget?: number
   max_tokens_default?: number
   max_tokens_cap?: number
+  default_effort?: '' | 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 }
 
 export type ModelBetas = {

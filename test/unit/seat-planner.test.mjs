@@ -44,6 +44,23 @@ function project(specs) {
 }
 
 class RuntimeRepo {
+  constructor(accounts = null) {
+    this.accounts = accounts
+  }
+  schedulingSnapshot(ids) {
+    return new Map(
+      ids.map((id) => [
+        id,
+        {
+          state: this.get(id),
+          account: this.accounts?.get(id) ? { status: 'active', schedulable: true, ...this.accounts.get(id) } : null,
+        },
+      ]),
+    )
+  }
+  writeHeartbeat(input) {
+    this.upsert(input)
+  }
   states = new Map()
   get(id) {
     return this.states.get(id) || null
@@ -716,9 +733,10 @@ function gatedSetup(t, specs) {
   const root = project(specs)
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const quota = gatedQuota(root)
+  specs.forEach((vm, index) => quota.ensure({ account_id: `account-${index + 1}`, vm_id: vm.id }))
   const pool = new PoolScheduler({
     projectRoot: root,
-    runtimeRepo: new RuntimeRepo(),
+    runtimeRepo: new RuntimeRepo(quota.repo),
     accountQuota: quota,
     workerHealth: async () => ({ ok: true, credential: { generation: 1, has_access: true } }),
     config: { seat_grace_ms: 30000 },

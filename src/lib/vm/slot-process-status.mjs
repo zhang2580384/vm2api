@@ -1,170 +1,64 @@
-/** Read-only status for the slot detail page. Never return worker identities or credentials. */
-import { execFile } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
-import path from 'node:path'
-import { promisify } from 'node:util'
-import { slotContainerName } from '../transport/rust-kernel-supervisor.mjs'
-import { isMissingContainerMessage, logTelemetryContainerSkip, telemetryContainerSkip } from './docker-container.mjs'
-import { inspectContainerOutcome } from './vm-runtime.mjs'
+/** Native telemetry status, read from the same authenticated VM kernel as inference. */
+import { rustKernelHealth, toPublicKernelHealth } from '../transport/rust-kernel-client.mjs'
+import { slotExec } from './slot-runtime.mjs'
 import { slotHost } from './slot-host.mjs'
-import { runtimeKind } from './runtime-kind.mjs'
-import { slotExecArgv } from './slot-exec.mjs'
+import { isCodexVm } from './vm-kind.mjs'
+import { runSlotProcess } from '../transport/slot-oauth.mjs'
+import { slotExecArgv, slotExecContainer } from './slot-exec.mjs'
+import { inspectContainerOrNull } from '../cluster/docker-remote.mjs'
 
-const exec = promisify(execFile)
-export const SLOT_WORKER_BIN = '/usr/local/bin/kin-worker'
-const PROBE = String.raw`
+export const RETIRE_LEGACY_TELEMETRY = `
 set -eu
-main=$(tr '\000' '\n' < /proc/1/cmdline | sed -n '1p')
-rust=0; go=0; telemetry=0
-case "$main" in
-  kin-kernel|*/kin-kernel|kin-kernel.bin|*/kin-kernel.bin) rust=1 ;;
-  kin-worker|*/kin-worker) go=1 ;;
-  */ld-linux-*.so.*|*/qemu-*)
-    # The shipped kernel uses a bundled glibc loader as PID1's executable; on
-    # an ARM64 host binfmt QEMU is PID1's executable and the program is argv[1].
-    if tr '\000' '\n' < /proc/1/cmdline | grep -Eq '(^|/)kin-kernel(\.bin)?$'; then rust=1; fi
-    if tr '\000' '\n' < /proc/1/cmdline | grep -Eq '(^|/)kin-worker$'; then go=1; fi
-    ;;
-esac
-for file in /proc/[0-9]*/comm; do
-  name=$(cat "$file" 2>/dev/null) || continue
-  [ "$name" = kin-worker ] || continue
-  mode=$(tr '\000' '\n' < "$(dirname "$file")/cmdline" 2>/dev/null | sed -n '2p') || continue
-  [ "$mode" != telemetry ] || telemetry=1
+legacy_pids() { ps -eo pid,args | awk '$2 ~ /(^|\\/)kin-worker$/ && $3 == "telemetry" {print $1}'; }
+pids=$(legacy_pids)
+for pid in $pids; do
+  case "$pid" in ''|*[!0-9]*) exit 1;; esac
+  command=$(tr '\\000' ' ' < /proc/$pid/cmdline 2>/dev/null || true)
+  case "$command" in *kin-worker\\ telemetry\\ --config\\ *) kill -TERM "$pid";; *) exit 1;; esac
 done
-printf 'rust_pid1=%s\ngo_worker_pid1=%s\ngo_telemetry=%s\n' "$rust" "$go" "$telemetry"
+attempt=0
+while [ -n "$(legacy_pids)" ]; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 20 ] || exit 1
+  sleep 0.1
+done
+printf '{"ok":true}\\n'
 `
 
-function isSafeSlotId(id) {
-  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/.test(String(id || ''))
-}
-
-export async function readSlotProcessStatus({ projectRoot, vm, run = exec, timeoutMs = 2500 } = {}) {
-  const unknown = { telemetry: { enabled: null, running: null }, process_topology: null }
-  if (!projectRoot || !isSafeSlotId(vm?.id)) return unknown
-  let enabled = null
+export async function retireLegacyTelemetry({ vm, run = runSlotProcess, inspect = inspectContainerOrNull } = {}) {
+  if (!vm?.id) return { ok: false, code: 'invalid_vm' }
+  const host = slotHost(vm)
+  if (host.native) return { ok: false, code: 'telemetry_unsupported' }
+  let runtime
   try {
-    const config = JSON.parse(await readFile(path.join(projectRoot, 'vms', vm.id, 'run', 'worker.json'), 'utf8'))
-    if (typeof config.telemetry?.enabled === 'boolean') enabled = config.telemetry.enabled
+    runtime = await inspect(host.dockerApi(), slotExecContainer(vm))
   } catch {
-    // Missing or unreadable config is unknown, never equivalent to disabled.
+    return { ok: false, code: 'telemetry_runtime_unavailable' }
   }
-  const kind = runtimeKind(vm)
-  if (kind !== 'docker' && kind !== 'kvm') return { ...unknown, telemetry: { enabled, running: null } }
-  const host = slotHost(vm)
-  if (host.native) return { ...unknown, telemetry: { enabled, running: await host.telemetryRunning(vm) } }
-  try {
-    const env = host.dockerEnv()
-    const target = { ...vm, runtime: { ...(vm.runtime || {}), container: slotContainerName({ vm }), type: kind } }
-    const { stdout } = await run('docker', slotExecArgv(target, ['sh', '-c', PROBE]), {
-      timeout: timeoutMs,
-      maxBuffer: 4096,
-      encoding: 'utf8',
-      ...(env ? { env } : {}),
-    })
-    const match = String(stdout)
-      .trim()
-      .match(/^rust_pid1=([01])\ngo_worker_pid1=([01])\ngo_telemetry=([01])$/)
-    if (!match) return { ...unknown, telemetry: { enabled, running: null } }
-    const topology = { rust_pid1: match[1] === '1', go_worker_pid1: match[2] === '1', go_telemetry: match[3] === '1' }
-    return { telemetry: { enabled, running: topology.go_telemetry }, process_topology: topology }
-  } catch {
-    // A stopped container, denied Docker access, or timeout must not break the detail page.
-    return { ...unknown, telemetry: { enabled, running: null } }
-  }
+  if (!runtime?.State?.Running) return { ok: true, running: false, state: 'stopped' }
+  const result = await run(slotExecArgv(vm, ['sh', '-c', RETIRE_LEGACY_TELEMETRY], { user: '0' }), {
+    timeoutMs: 5000,
+    env: host.dockerEnv(),
+  })
+  return result.code === 0 && !result.timed_out
+    ? { ok: true, running: true }
+    : { ok: false, code: 'legacy_telemetry_stop_failed', error: 'Legacy telemetry process did not stop' }
 }
 
-/**
- * The sidecar is a `docker exec -d` child with no supervisor: a container restart,
- * a host reboot or its own exit on a 4xx leaves the slot without telemetry for good.
- * Relaunch it only when the config enables it and the container was observed without one.
- * Background check: `docker exec` takes 3-5s on a loaded host, far over the detail page's budget.
- */
-export async function ensureTelemetrySidecar({ projectRoot, vm, run = exec, timeoutMs = 15_000 } = {}) {
-  const status = await readSlotProcessStatus({ projectRoot, vm, run, timeoutMs })
-  if (status.telemetry.enabled !== true || status.telemetry.running !== false) {
-    return { ok: true, action: 'unchanged' }
-  }
-  const host = slotHost(vm)
-  if (host.native) {
-    const restarted = await host.restartTelemetry(vm, { enabled: true })
-    return restarted.ok
-      ? { ok: true, action: 'started' }
-      : { ok: false, action: 'start_failed', error: restarted.error }
-  }
-  try {
-    const env = slotHost(vm).dockerEnv()
-    const kind = runtimeKind(vm)
-    const target = { ...vm, runtime: { ...(vm.runtime || {}), container: slotContainerName({ vm }), type: kind } }
-    await run(
-      'docker',
-      slotExecArgv(target, [SLOT_WORKER_BIN, 'telemetry', '--config', '/run/kin/worker.json'], {
-        detach: true,
-      }),
-      { timeout: timeoutMs, maxBuffer: 4096, encoding: 'utf8', ...(env ? { env } : {}) },
-    )
-    return { ok: true, action: 'started' }
-  } catch (error) {
-    return { ok: false, action: 'start_failed', error: String(error?.message || error) }
-  }
-}
-
-/** Replace only the Go telemetry child; the slot container and Rust process stay up. */
-export async function restartTelemetrySidecar({
-  projectRoot,
-  vm,
-  enabled,
-  run = exec,
-  timeoutMs = 15_000,
-  inspectContainerOutcome: inspectOutcome = inspectContainerOutcome,
-} = {}) {
-  if (!projectRoot || !isSafeSlotId(vm?.id)) return { ok: false, action: 'invalid_vm' }
-  const kind = runtimeKind(vm)
-  if (kind !== 'docker' && kind !== 'kvm') return { ok: false, action: 'unsupported_runtime' }
-  const host = slotHost(vm)
-  if (host.native) return host.restartTelemetry(vm, { enabled })
-  const env = host.dockerEnv()
-  const container = slotContainerName({ vm })
-  const target = { ...vm, runtime: { ...(vm.runtime || {}), container, type: kind } }
-  const inspected = inspectOutcome(container)
-  if (inspected.status === 'missing') {
-    logTelemetryContainerSkip('fleet', vm.id, container)
-    return telemetryContainerSkip(container)
-  }
-  if (inspected.status === 'error') {
+export async function readSlotProcessStatus({ projectRoot, vm, health = rustKernelHealth, timeoutMs = 2500 } = {}) {
+  const unknown = { telemetry: null, process_topology: null }
+  if (!projectRoot || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/.test(String(vm?.id || ''))) return unknown
+  if (isCodexVm(vm) || slotHost(vm).native) {
     return {
-      ok: false,
-      action: 'inspect_failed',
-      code: 'docker_inspect_failed',
-      error: inspected.error,
+      ...unknown,
+      telemetry: { enabled: false, state: 'unsupported', pending_events: 0, last_upload_at: null, last_error: null },
     }
   }
-  const stop = 'pkill -TERM -x kin-worker 2>/dev/null || true'
   try {
-    await run('docker', slotExecArgv(target, ['sh', '-c', stop]), {
-      timeout: timeoutMs,
-      maxBuffer: 4096,
-      encoding: 'utf8',
-      ...(env ? { env } : {}),
-    })
-    if (enabled !== true) return { ok: true, action: 'stopped' }
-    await run(
-      'docker',
-      slotExecArgv(target, [SLOT_WORKER_BIN, 'telemetry', '--config', '/run/kin/worker.json'], { detach: true }),
-      {
-        timeout: timeoutMs,
-        maxBuffer: 4096,
-        encoding: 'utf8',
-        ...(env ? { env } : {}),
-      },
-    )
-    return { ok: true, action: 'restarted' }
-  } catch (error) {
-    const message = String(error?.message || error)
-    if (isMissingContainerMessage(message)) {
-      logTelemetryContainerSkip('fleet', vm.id, container, message)
-      return telemetryContainerSkip(container, message)
-    }
-    return { ok: false, action: 'restart_failed', error: message }
+    const observed = await health(slotExec(projectRoot, vm), { timeoutMs })
+    return { ...unknown, telemetry: toPublicKernelHealth(observed, 'rust').telemetry ?? null }
+  } catch {
+    // A stopped/unreachable VM is unknown, not disabled or uploading.
+    return unknown
   }
 }

@@ -5,6 +5,7 @@
  */
 
 import {
+  appendLiftedSystemMessage,
   applyStructuredOutput,
   canonicalizeClaudeMessagesShape,
   openaiResponseFormatToOutputConfig,
@@ -16,6 +17,13 @@ import { openaiReasoningToClaudeThinking, claudeThinkingToOpenAIReasoning } from
 import { openaiContentToClaudeContent } from './images.mjs'
 import { remapCodexTools } from './codex-tools.mjs'
 import { CLAUDE_WEB_SEARCH_TOOL, isWebSearchTool } from './web-search.mjs'
+import {
+  extractOpenaiUsage,
+  isOpenaiWireUsage,
+  mergeUsage,
+  openaiChatUsageFromExtract,
+  reasoningTokensOf,
+} from './openai-usage.mjs'
 
 const DEFAULT_MODEL = 'claude-haiku-4-5-20251001'
 
@@ -187,8 +195,7 @@ function openaiMessagesToClaude(messages) {
 
   for (const m of messages || []) {
     if (m.role === 'system' || m.role === 'developer') {
-      const text = contentToText(m.content)
-      if (text) systemParts.push(text)
+      appendLiftedSystemMessage(systemParts, out, m)
       continue
     }
 
@@ -212,9 +219,13 @@ function openaiMessagesToClaude(messages) {
     }
 
     if (m.role === 'assistant') {
-      const content = []
-      const text = contentToText(m.content)
-      if (text) content.push({ type: 'text', text })
+      // Keep each text/cache boundary before appending tool calls. Flattening
+      // an assistant turn discards controls just as it does for system turns.
+      const parts = Array.isArray(m.content) ? m.content : [m.content]
+      const content = parts.flatMap((part) => {
+        const text = contentToText(Array.isArray(m.content) ? [part] : part)
+        return text ? [withCacheControl({ type: 'text', text }, part)] : []
+      })
       if (Array.isArray(m.tool_calls)) {
         for (const tc of m.tool_calls) {
           let input = {}
@@ -267,13 +278,29 @@ function withUpstreamStream(claude) {
  * Anthropic / OpenAI default: omitted `stream` is JSON. NewAPI health probes
  * omit the field (Go omitempty) and then json.Unmarshal the body — SSE
  * (`event:…`) becomes `invalid character 'e' looking for beginning of value`.
- * Official Claude Code that omits `stream` still streams via Accept.
+ * An omitted `stream` streams only when Accept prefers SSE over JSON. Claude
+ * Code 2.1.311+ sends `Accept: application/json, text/event-stream` on its
+ * non-streaming auto-mode classifier and still parses the reply as JSON.
  */
 export function isClientStream(body, headers = {}) {
   if (body?.stream === false || body?.stream === 0 || body?.stream === 'false') return false
   if (body?.stream === true || body?.stream === 1 || body?.stream === 'true') return true
-  const accept = String(headers?.accept || headers?.Accept || '').toLowerCase()
-  return accept.includes('text/event-stream')
+  const accept = String(headers?.accept || headers?.Accept || '')
+  const sse = acceptQuality(accept, 'text/event-stream')
+  return sse > 0 && sse > acceptQuality(accept, 'application/json')
+}
+
+/** Highest q-value an Accept header gives `type` (exact media range only); -1 when absent. */
+function acceptQuality(accept, type) {
+  let best = -1
+  for (const part of accept.toLowerCase().split(',')) {
+    const [range, ...params] = part.split(';').map((s) => s.trim())
+    if (range !== type) continue
+    const q = params.find((p) => p.startsWith('q='))
+    const value = q ? Number(q.slice(2)) : 1
+    if (Number.isFinite(value) && value > best) best = value
+  }
+  return best
 }
 
 /** Lift OpenAI function tools onto Anthropic Messages without treating the hop as official CC. */
@@ -328,7 +355,7 @@ function openaiToClaude(body, opts) {
     max_tokens: body.max_tokens || body.max_completion_tokens || defaultMaxTokensForModel(body.model),
     messages,
   }
-  if (systemParts.length) out.system = systemParts.map((text) => ({ type: 'text', text }))
+  if (systemParts.length) out.system = systemParts
   if (body.temperature != null) out.temperature = body.temperature
   if (body.top_p != null) out.top_p = body.top_p
   if (body.stop != null) out.stop_sequences = Array.isArray(body.stop) ? body.stop : [body.stop]
@@ -365,7 +392,7 @@ function completionsToClaude(body, opts) {
 function responsesToClaude(body, opts) {
   const systemParts = []
   const messages = []
-  if (body.instructions) systemParts.push(String(body.instructions))
+  if (body.instructions) systemParts.push({ type: 'text', text: String(body.instructions) })
   const input = body.input
   if (typeof input === 'string') {
     messages.push({ role: 'user', content: [{ type: 'text', text: input }] })
@@ -375,12 +402,12 @@ function responsesToClaude(body, opts) {
         messages.push({ role: 'user', content: [{ type: 'text', text: item }] })
         continue
       }
-      const role = item.role === 'assistant' ? 'assistant' : item.role === 'system' ? 'system' : 'user'
-      const text = contentToText(item.content ?? item.text ?? item)
-      if (role === 'system') {
-        if (text) systemParts.push(text)
+      if (item.role === 'system' || item.role === 'developer') {
+        appendLiftedSystemMessage(systemParts, messages, { ...item, content: item.content ?? item.text ?? item })
         continue
       }
+      const role = item.role === 'assistant' ? 'assistant' : 'user'
+      const text = contentToText(item.content ?? item.text ?? item)
       const block = withCacheControl({ type: 'text', text }, item)
       const last = messages[messages.length - 1]
       if (last?.role === role && Array.isArray(last.content)) last.content.push(block)
@@ -394,7 +421,7 @@ function responsesToClaude(body, opts) {
     max_tokens: body.max_output_tokens || body.max_tokens || 1024,
     messages,
   }
-  if (systemParts.length) out.system = systemParts.map((text) => ({ type: 'text', text }))
+  if (systemParts.length) out.system = systemParts
   const tools = openaiToolsToClaude(body.tools)
   if (tools?.length) out.tools = tools
   const tc = openaiToolChoiceToClaude(body.tool_choice)
@@ -445,9 +472,20 @@ export function fromClaudeToOpenAIChat(claude, requestedModel, vmId, mode = 'con
 /**
  * Claude usage → OpenAI Chat usage with cache detail
  * (sub2api apicompat ChatTokenDetails counterpart: cached_tokens / cache_creation_tokens).
- * Token totals keep the Anthropic input_tokens meaning — details are additive only.
+ * Anthropic input is uncached; details are added to form inclusive prompt_tokens.
+ * OpenAI-inclusive usage is passed through without adding cache again.
+ * reasoning_tokens is a subset of completion_tokens and is never added to it.
  */
 function chatUsage(usage) {
+  if (isOpenaiWireUsage(usage)) {
+    return (
+      openaiChatUsageFromExtract(extractOpenaiUsage(usage)) || {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+      }
+    )
+  }
   const uncached = Number(usage?.input_tokens || 0)
   const cached = cacheReadTokens(usage)
   const created = cacheCreationTokens(usage)
@@ -460,6 +498,8 @@ function chatUsage(usage) {
   }
   const details = promptTokensDetails(usage)
   if (details) out.prompt_tokens_details = details
+  const reasoning = reasoningTokensOf(usage)
+  if (reasoning != null) out.completion_tokens_details = { reasoning_tokens: reasoning }
   return out
 }
 
@@ -524,6 +564,27 @@ export function fromClaudeToResponses(claude, requestedModel, vmId, mode = 'conv
 
 /** Claude usage → OpenAI Responses usage with input_tokens_details cache breakdown. */
 function responsesUsage(usage) {
+  if (isOpenaiWireUsage(usage)) {
+    const extracted = extractOpenaiUsage(usage)
+    const input = extracted?.input_tokens || 0
+    const output = extracted?.output_tokens || 0
+    const out = {
+      input_tokens: input,
+      output_tokens: output,
+      total_tokens: extracted?.total_tokens ?? input + output,
+    }
+    if (extracted?.cached_tokens != null || extracted?.cache_write_tokens != null) {
+      out.input_tokens_details = {}
+      if (extracted.cached_tokens != null) out.input_tokens_details.cached_tokens = extracted.cached_tokens
+      if (extracted.cache_write_tokens != null) {
+        out.input_tokens_details.cache_creation_tokens = extracted.cache_write_tokens
+      }
+    }
+    if (extracted?.reasoning_tokens != null) {
+      out.output_tokens_details = { reasoning_tokens: extracted.reasoning_tokens }
+    }
+    return out
+  }
   const uncached = Number(usage?.input_tokens || 0)
   const cached = cacheReadTokens(usage)
   const created = cacheCreationTokens(usage)
@@ -536,6 +597,8 @@ function responsesUsage(usage) {
   }
   const details = promptTokensDetails(usage)
   if (details) out.input_tokens_details = details
+  const reasoning = reasoningTokensOf(usage)
+  if (reasoning != null) out.output_tokens_details = { reasoning_tokens: reasoning }
   return out
 }
 
@@ -681,7 +744,7 @@ export function applyClaudeSSELineToMessage(line, state) {
     if (evt.delta && Object.prototype.hasOwnProperty.call(evt.delta, 'diagnostics')) {
       message.diagnostics = evt.delta.diagnostics
     }
-    if (evt.usage) message.usage = { ...(message.usage || {}), ...evt.usage }
+    if (evt.usage) message.usage = mergeUsage(message.usage, evt.usage)
   }
   return message
 }

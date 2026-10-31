@@ -18,6 +18,8 @@ import {
 import { usageFromSseLine } from '../protocol/handle-codex.mjs'
 import { BETA_CONTEXT_1M } from '../protocol/claude-code-betas.mjs'
 import { shouldPassContext1mByPolicy } from '../protocol/model-policy.mjs'
+import { createStreamTiming } from '../protocol/stream-timing.mjs'
+import { mergeUsage } from '../protocol/openai-usage.mjs'
 
 export function resolveInferenceBackend(req) {
   if (req?.apiKeyKind !== 'managed') return 'oauth'
@@ -101,16 +103,18 @@ function mergeCallerProtocolHeaders(base = {}, caller = {}, configured = {}, mod
 
 async function readLines(stream, onLine) {
   let buf = ''
+  let receivedAt = null
   for await (const chunk of stream) {
+    receivedAt = Date.now()
     buf += chunk.toString('utf8')
     let idx
     while ((idx = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, idx)
       buf = buf.slice(idx + 1)
-      await onLine(line)
+      await onLine(line, receivedAt)
     }
   }
-  if (buf) await onLine(buf)
+  if (buf) await onLine(buf, receivedAt)
 }
 
 function openAIResponsesSseEvent(line) {
@@ -266,6 +270,7 @@ export async function runApiInference({
     canonical.model,
   )
 
+  const timing = createStreamTiming()
   let upstream
   try {
     upstream = await forwardApi({
@@ -349,17 +354,22 @@ export async function runApiInference({
       res,
       converters,
       body,
+      timing,
     })
   }
 
   const classifierSseState = { dataBuf: '' }
   let classifierError = null
   let classifierStopped = false
+  let streamedUsage = null
   const readUpstreamLines = async (onLine) => {
     try {
-      await readLines(upstream, async (line) => {
+      await readLines(upstream, async (line, receivedAt) => {
+        const event = consumeClaudeSSEData(line, classifierSseState)
+        timing.observe(event, receivedAt)
+        streamedUsage = mergeUsage(streamedUsage, event?.message?.usage || event?.usage)
         if (requestContext) {
-          const event = consumeClaudeSSEData(line, classifierSseState)
+          // The same decoded event drives classifier validation and performance timing.
           if (event?.type === 'error')
             classifierError = {
               ...event,
@@ -430,12 +440,13 @@ export async function runApiInference({
       }
     })
     const failure = classifierFailure()
-    if (failure) return { ...failure, committed: false }
+    if (failure) return { ...failure, ...timing.snapshot(), committed: false }
     if (terminalError) {
       const declared = Number(terminalError.error?.status)
       const status = declared >= 400 && declared < 600 ? declared : mapUpstreamError(200, terminalError).status
       return {
         ...resultBase,
+        ...timing.snapshot(),
         ok: false,
         status,
         body: terminalError,
@@ -449,6 +460,7 @@ export async function runApiInference({
     if (!sawMessageStop) {
       return {
         ...resultBase,
+        ...timing.snapshot(),
         ok: false,
         body: assembled || { type: 'error', error: { message: 'empty api upstream' } },
         usage: assembled?.usage || null,
@@ -461,6 +473,7 @@ export async function runApiInference({
     const complete = resultBase.ok && isCompleteAssistantMessage(hop)
     return {
       ...resultBase,
+      ...timing.snapshot(),
       ok: complete,
       body: assembled || { type: 'error', error: { message: 'empty api upstream' } },
       usage: assembled?.usage || null,
@@ -480,11 +493,8 @@ export async function runApiInference({
 
   let committed = false
   let sawStop = false
-  const started = Date.now()
-  let ttftMs = null
   await readUpstreamLines(async (line) => {
     if (personaHideTokens) line = converters.hidePersonaUsageInSseLine(line, personaHideTokens, cacheTtl) || line
-    if (String(line).startsWith('data:') && ttftMs == null) ttftMs = Date.now() - started
     if (String(line).includes('message_stop')) sawStop = true
     if (!committed && String(line).startsWith('data:')) {
       committed = true
@@ -507,14 +517,15 @@ export async function runApiInference({
   })
 
   const failure = classifierFailure()
-  if (failure) return { ...failure, committed, ttftMs }
+  if (failure) return { ...failure, ...timing.snapshot(), committed }
 
   return {
     ...resultBase,
+    ...timing.snapshot(),
+    usage: streamedUsage,
     ok: resultBase.ok && (deliveryMode !== 'verified' || sawStop),
     terminalState: sawStop ? 'verified' : committed ? 'incomplete' : 'rejected',
     committed,
-    ttftMs,
   }
 }
 
@@ -528,6 +539,7 @@ async function runOpenAIResponsesUpstream({
   res,
   converters,
   body,
+  timing,
 }) {
   const chunks = []
   const anthropicSse = protocol === 'anthropic.messages' ? createAnthropicSseState() : null
@@ -536,11 +548,9 @@ async function runOpenAIResponsesUpstream({
   let committed = false
   let completed = false
   let sawTerminal = false
-  let ttftMs = null
   let streamedUsage = null
   let terminalFailure = null
   const pendingLines = []
-  const started = Date.now()
 
   const writeStreamLine = (raw) => {
     if (!res.headersSent) converters.writeSSEHeaders(res)
@@ -570,18 +580,18 @@ async function runOpenAIResponsesUpstream({
     }
   }
 
-  await readLines(upstream, async (line) => {
+  await readLines(upstream, async (line, receivedAt) => {
     if (conversionError) return
     const raw = String(line || '')
     const event = openAIResponsesSseEvent(raw)
+    timing.observe(event, receivedAt)
     const failure = openAIResponsesFailure(event)
     if (failure) terminalFailure = failure
     const seen = usageFromSseLine(raw)
-    if (seen) streamedUsage = seen
+    if (seen) streamedUsage = mergeUsage(streamedUsage, seen)
     const startsOutput = isOpenAIResponsesCommitEvent(event)
     const completes = event?.type === 'response.completed' || event?.type === 'response.done'
     const wasCommitted = committed
-    if ((startsOutput || completes) && ttftMs == null) ttftMs = Date.now() - started
     if (!committed && (startsOutput || completes)) committed = true
     if (!clientStream) {
       chunks.push(raw)
@@ -599,7 +609,10 @@ async function runOpenAIResponsesUpstream({
 
   if (!clientStream) {
     if (terminalFailure)
-      return mappedOpenAIResponsesFailure(resultBase, terminalFailure, committed, { usage: streamedUsage, ttftMs })
+      return mappedOpenAIResponsesFailure(resultBase, terminalFailure, committed, {
+        usage: streamedUsage,
+        ...timing.snapshot(),
+      })
     let assembled
     let outBody
     try {
@@ -612,6 +625,7 @@ async function runOpenAIResponsesUpstream({
       if (!isToolArgumentsError(error)) throw error
       return {
         ...resultBase,
+        ...timing.snapshot(),
         ok: false,
         status: 502,
         body: { error: { type: 'upstream_protocol_error', code: error.code, message: error.message } },
@@ -624,15 +638,19 @@ async function runOpenAIResponsesUpstream({
     const complete = resultBase.ok && sawTerminal && hasBody
     return {
       ...resultBase,
+      ...timing.snapshot(),
       ok: complete,
       body: outBody,
-      usage: assembled?.usage || streamedUsage || outBody?.usage || null,
+      usage: mergeUsage(streamedUsage, assembled?.usage || outBody?.usage),
       terminalState: complete ? 'verified' : hasBody ? 'incomplete' : 'rejected',
       committed,
     }
   }
   if (terminalFailure)
-    return mappedOpenAIResponsesFailure(resultBase, terminalFailure, committed, { usage: streamedUsage, ttftMs })
+    return mappedOpenAIResponsesFailure(resultBase, terminalFailure, committed, {
+      usage: streamedUsage,
+      ...timing.snapshot(),
+    })
   if (conversionError)
     return {
       ...resultBase,
@@ -642,7 +660,7 @@ async function runOpenAIResponsesUpstream({
       terminalState: 'incomplete',
       committed,
       usage: streamedUsage,
-      ttftMs,
+      ...timing.snapshot(),
     }
 
   return {
@@ -651,7 +669,7 @@ async function runOpenAIResponsesUpstream({
     usage: streamedUsage,
     terminalState: completed ? 'verified' : committed ? 'incomplete' : 'rejected',
     committed,
-    ttftMs,
+    ...timing.snapshot(),
   }
 }
 

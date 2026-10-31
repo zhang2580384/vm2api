@@ -88,14 +88,14 @@ export function riskPatchForProfile(mode) {
 /**
  * @param {{ mode: string, persistRouting: (patch: object) => unknown, settings: { get: Function, set: Function }, distillFile: string, setDistill?: (rules: object) => void }} input
  */
-export function applyUsageProfile({ mode, persistRouting, settings, distillFile, setDistill } = {}) {
+export async function applyUsageProfile({ mode, persistRouting, settings, distillFile, setDistill } = {}) {
   const profile = normalizeUsageProfile(mode)
   if (!profile) {
     const err = new Error('mode 必须是 personal 或 relay')
     err.code = 'invalid_profile'
     throw err
   }
-  const routing = persistRouting(routingPatchForProfile(profile))
+  const routing = await persistRouting(routingPatchForProfile(profile))
   const risk = riskPatchForProfile(profile)
   const distill = saveDistillRules(distillFile, risk.distill)
   if (typeof setDistill === 'function') setDistill(distill)

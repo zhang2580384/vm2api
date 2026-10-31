@@ -712,6 +712,69 @@ test('valid unique tool names are not changed', () => {
   )
 })
 
+test('duplicate names keep one canonical reference as history grows', () => {
+  const tools = [{ name: 'odoo_import_excel' }, { name: 'odoo_import_excel' }, { name: 'odoo_list_models' }]
+  const history = (count) =>
+    Array.from({ length: count }, (_, index) => ({
+      type: 'tool_use',
+      id: `toolu_${index + 1}`,
+      name: 'odoo_import_excel',
+      input: { n: index + 1 },
+    }))
+  const rewritten = (count) =>
+    rewriteToolNames({
+      tools,
+      tool_choice: { type: 'tool', name: 'odoo_import_excel' },
+      messages: [{ role: 'assistant', content: history(count) }],
+    })
+  const two = rewritten(2)
+  const three = rewritten(3)
+  const names = two.body.tools.map((tool) => tool.name)
+  assert.equal(new Set(names).size, names.length)
+  assert.equal(names[0], 'odoo_import_excel')
+  assert.match(names[1], /^kin_tool_/)
+  assert.deepEqual(
+    three.body.tools.map((tool) => tool.name),
+    names,
+  )
+  assert.equal(two.body.tool_choice.name, names[0])
+  assert.equal(three.body.tool_choice.name, names[0])
+  assert.deepEqual(
+    two.body.messages[0].content.map((block) => block.name),
+    [names[0], names[0]],
+  )
+  assert.deepEqual(
+    three.body.messages[0].content.map((block) => block.name),
+    [names[0], names[0], names[0]],
+  )
+})
+
+test('a custom tool does not reuse a reserved server tool name', () => {
+  const result = rewriteToolNames({
+    tools: [
+      { type: 'web_search_20250305', name: 'web_search' },
+      { name: 'web_search', input_schema: { type: 'object' } },
+    ],
+  })
+  assert.equal(result.body.tools[0].name, 'web_search')
+  assert.match(result.body.tools[1].name, /^kin_tool_/)
+  assert.notEqual(result.body.tools[0].name, result.body.tools[1].name)
+})
+
+test('disabled alias rewrite still dedupes legal names and rewrites illegal ones', () => {
+  const result = rewriteToolNames(
+    {
+      tools: [{ name: 'read_file' }, { name: 'read_file' }, { name: 'bad name' }],
+    },
+    { enabled: false },
+  )
+  const names = result.body.tools.map((tool) => tool.name)
+  assert.equal(names[0], 'read_file')
+  assert.match(names[1], /^kin_tool_/)
+  assert.match(names[2], /^kin_tool_/)
+  assert.equal(new Set(names).size, 3)
+})
+
 test('native Messages image_url parts become Claude image blocks', () => {
   const body = prepareAnthropicRequest({
     model: 'claude-fable-5',

@@ -19,6 +19,7 @@ import { RiskFeed } from './feed'
 import { GateRail, type StageState } from './gate-rail'
 import { HardRegexSettings } from './hard-regex-settings'
 import { HitTable } from './hits'
+import { JevUsagePanel } from './jev-usage'
 import {
   PASS_REASONS,
   STAGES,
@@ -151,6 +152,12 @@ export function RiskAuditPage() {
         <p className='mt-2 text-sm text-destructive' role='alert'>
           今日计数读取失败：{(stats.error as Error).message}
         </p>
+      ) : null}
+
+      {view === 'all' || view === 'jev' ? (
+        <div className='mt-6'>
+          <JevUsagePanel />
+        </div>
       ) : null}
 
       <div

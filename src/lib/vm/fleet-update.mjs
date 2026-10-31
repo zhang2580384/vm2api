@@ -1,18 +1,3 @@
-/**
- * Rolling update across all slots. Reloads the guest worker (new shared
- * binary) and/or collects guest identity. Never restarts kin-gateway.
- * Never docker rm. KVM reloads the guest kernel unit, not the runner.
- */
-import { listVms, getVm } from './vm-registry.mjs'
-import { runtimeKind } from './runtime-kind.mjs'
-import { reloadSlotReady, slotExec } from './slot-runtime.mjs'
-import { collectSlotIdentity } from './guest-identity.mjs'
-import { rustKernelHealth } from '../transport/rust-kernel-client.mjs'
-import { restartTelemetrySidecar } from './slot-process-status.mjs'
-import { isNativeNodeVm, vmNodeId } from '../cluster/placement.mjs'
-import { slotHost } from './slot-host.mjs'
-import { restartRemoteServices } from '../cluster/remote-slot.mjs'
-import { isMissingContainerMessage, logTelemetryContainerSkip, telemetryContainerSkip } from './docker-container.mjs'
 import {
   drainEgressForProxyConfig,
   egressPidsForProxyConfig,
@@ -26,54 +11,155 @@ import {
   waitPortReleased,
 } from './egress.mjs'
 
-const ACTIONS = new Set(['collect', 'reload', 'roll', 'telemetry'])
+/**
+ * Rolling update across all slots. Reloads the guest worker (new shared
+ * binary) and/or collects guest identity. Never restarts kin-gateway.
+ * Never docker rm. KVM reloads the guest kernel unit, not the runner.
+ */
+import { listVms, getVm } from './vm-registry.mjs'
+import { runtimeKind } from './runtime-kind.mjs'
+import { reloadSlotReady, slotExec } from './slot-runtime.mjs'
+import { collectSlotIdentity } from './guest-identity.mjs'
+import { rustKernelHealth } from '../transport/rust-kernel-client.mjs'
+import path from 'node:path'
+import { syncNativeTelemetry } from './vm-runtime.mjs'
+import { writeSlotSeedFiles } from './slot-seed.mjs'
+import { readVmProxyGeo, writeVmProxyTelemetryEgress } from './native-telemetry.mjs'
+import { slotHost } from './slot-host.mjs'
+import { readSlotProcessStatus, retireLegacyTelemetry } from './slot-process-status.mjs'
+import fs from 'node:fs'
+import { withVmLock } from './vm-file.mjs'
+import { normalizeVmKind } from './vm-kind.mjs'
 
-export async function restartLocalEgress(projectRoot, vm, opts = {}) {
-  if (isLocalEgressProxy(vm.proxy)) return { ok: true, egress: 'local' }
-  const proxyId = vm.proxy?.id
-  return runExclusiveProxyEgress(projectRoot, proxyId, async () => {
-    const running = inspectEgressProcess(projectRoot, proxyId)
-    const stopped = stopEgressProcess(projectRoot, proxyId)
-    if (!stopped.ok) return { ok: false, action: 'egress_stop_failed', error: stopped.error }
-    const pending = new Set(stopped.pending || [])
-    for (const pid of egressPidsForProxyConfig(projectRoot, proxyId)) pending.add(pid)
-    if (running.ok && running.pid) pending.add(running.pid)
-    for (const pid of pending) {
-      const exited = await waitEgressExit(pid)
-      if (!exited.ok) return { ok: false, action: 'egress_stop_failed', error: exited.error, pid }
-    }
-    const drained = await drainEgressForProxyConfig(projectRoot, proxyId)
-    if (!drained.ok) return { ok: false, action: 'egress_stop_failed', error: drained.error, pid: drained.pid }
-    const spec = running.ok ? String(running.listen_tcp || '') : readEgressListenTcp(projectRoot, proxyId)
-    const colon = spec.lastIndexOf(':')
-    const host = colon > 0 ? spec.slice(0, colon) : ''
-    const port = colon > 0 ? Number(spec.slice(colon + 1)) : 0
-    if (host && Number.isFinite(port) && port > 0) {
-      const portFree = await waitPortReleased(host, port)
-      if (!portFree.ok) return { ok: false, action: 'egress_stop_failed', error: portFree.error }
-    }
-    const started = await startProxyEgress(projectRoot, vm.proxy, opts)
-    if (!started?.ok) return { ok: false, action: 'egress_start_failed', error: started?.error || 'kin-egress failed' }
-    return { ok: true, egress: 'restarted', pid: started.pid }
+function publicationRevision(vm) {
+  return JSON.stringify({
+    node_id: vm.node_id,
+    runtime: vm.runtime,
+    runtime_type: vm.runtime_type,
+    seed_policy: vm.seed_policy,
+    proxy: vm.proxy,
+    timezone: vm.timezone,
+    locale: vm.locale,
+    fingerprint: vm.fingerprint,
+    kind: normalizeVmKind(vm).kind,
   })
 }
 
-async function restartLocalServices({ projectRoot, vm, enabled, egressOpts = {} }) {
-  const telemetry = await restartTelemetrySidecar({ projectRoot, vm, enabled })
-  if (!telemetry.ok) return telemetry
-  const egress = await restartLocalEgress(projectRoot, vm, egressOpts)
-  if (!egress.ok) return egress
-  return { ...telemetry, egress: egress.egress ?? (telemetry.skipped ? 'unchanged' : undefined) }
+function publicationPlacement(vm) {
+  return JSON.stringify([
+    vm.node_id,
+    vm.runtime,
+    runtimeKind(vm),
+    normalizeVmKind(vm).kind,
+    slotHost(vm).native === true,
+  ])
 }
 
-function normalizeTelemetryRefresh(changed, vm) {
-  if (changed?.ok || changed?.skipped) return changed
-  const message = String(changed?.error || changed?.code || '')
-  if (!isMissingContainerMessage(message)) return changed
-  const container =
-    String(vm?.runtime?.container || '').trim() || (vm?.id ? `kin-${String(vm.id).replace(/^vm-/, '')}` : '')
-  logTelemetryContainerSkip('fleet', vm.id, container, message)
-  return telemetryContainerSkip(container, message)
+const ACTIONS = new Set(['collect', 'reload', 'roll', 'telemetry'])
+
+/** Acknowledged publication followed by native state, never a sidecar/egress restart. */
+export async function applyNativeTelemetry({
+  projectRoot,
+  vm,
+  routing = {},
+  timeoutMs = 6000,
+  replaceEnv = false,
+} = {}) {
+  const initial = { ok: false, wrote: false, published: false, applied: false, state: 'unknown' }
+  if (!vm?.id || !projectRoot) return { ...initial, code: 'invalid_vm' }
+  const vmPath = path.join(projectRoot, 'vms', `${vm.id}.json`)
+  return withVmLock(`seed-publication:${vmPath}`, async () => {
+    const result = { ...initial, supported: true }
+    const current = () => {
+      const record = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+      if (record.id !== vm.id) throw new Error('vm_record_changed')
+      return record
+    }
+    try {
+      let record = current()
+      let host = slotHost(record)
+      if (host.native || normalizeVmKind(record).kind !== 'claude') {
+        return {
+          ...result,
+          supported: false,
+          state: 'unsupported',
+          code: 'telemetry_unsupported',
+          error: '此槽不支持 VM 原生遥测',
+        }
+      }
+      const placement = publicationPlacement(record)
+      const retired = await retireLegacyTelemetry({ projectRoot, vm: record })
+      if (!retired.ok) return { ...result, ...retired, published: false, applied: false }
+      record = current()
+      if (placement !== publicationPlacement(record)) {
+        return { ...result, code: 'telemetry_publication_superseded', error: 'VM placement changed during publication' }
+      }
+      host = slotHost(record)
+      const slotDir = path.join(projectRoot, 'vms', record.id)
+      // A node's effective settings are authoritative; never preserve an old controller mirror.
+      const existing = await host.seedFiles(record, slotDir)
+      const observedPlacement = publicationPlacement(record)
+      record = current()
+      if (observedPlacement !== publicationPlacement(record)) {
+        return { ...result, code: 'telemetry_publication_superseded', error: 'VM placement changed during publication' }
+      }
+      const revision = publicationRevision(record)
+      result.seed = writeSlotSeedFiles(projectRoot, record, null, {
+        existingSettings: existing.files['settings.json'] === null ? {} : JSON.parse(existing.files['settings.json']),
+        replaceEnv,
+      })
+      result.wrote = result.seed.wrote === true
+      const written = syncNativeTelemetry(record, projectRoot, routing, { publish: false })
+      if (!written.supported || !written.wrote) return { ...result, code: written.error || 'telemetry_config_failed' }
+      const geo = readVmProxyGeo(record)
+      const egress = writeVmProxyTelemetryEgress(projectRoot, record, geo)
+      if (geo && !egress.wrote && egress.reason !== 'proxy_geo_unavailable') {
+        return { ...result, code: egress.reason || 'telemetry_egress_write_failed', published: false, applied: false }
+      }
+      result.egress = { wrote: egress.wrote, overwritten: egress.overwritten, reason: egress.reason || null }
+      const publication = await host.syncTelemetry(record, slotDir)
+      if (publication?.published !== true)
+        return { ...result, code: 'telemetry_publish_failed', error: 'VM configuration publication was not confirmed' }
+      result.published = true
+      if (publicationRevision(current()) !== revision) {
+        return {
+          ...result,
+          code: 'telemetry_publication_superseded',
+          error: 'VM configuration changed during publication',
+        }
+      }
+      if (!retired.running) return { ...result, ok: true, action: 'published', state: 'stopped' }
+      const deadline = Date.now() + timeoutMs
+      do {
+        const { telemetry } = await readSlotProcessStatus({ projectRoot, vm: record })
+        if (publicationRevision(current()) !== revision) {
+          return {
+            ...result,
+            code: 'telemetry_publication_superseded',
+            error: 'VM configuration changed during observation',
+          }
+        }
+        if (
+          telemetry?.enabled === written.enabled &&
+          (written.enabled || (telemetry.state === 'disabled' && telemetry.pending_events === 0))
+        ) {
+          return { ...result, ...telemetry, ok: true, action: 'applied', applied: true }
+        }
+        await sleep(100)
+      } while (Date.now() < deadline)
+      return { ...result, code: 'telemetry_not_ready', error: 'native telemetry did not acknowledge policy' }
+    } catch {
+      return {
+        ...result,
+        code: result.published
+          ? 'telemetry_observation_unavailable'
+          : result.wrote
+            ? 'telemetry_publish_failed'
+            : 'telemetry_config_failed',
+        error: 'VM telemetry configuration is unavailable',
+      }
+    }
+  })
 }
 
 function sleep(ms) {
@@ -160,16 +246,9 @@ export async function updateOneSlot(
       const enabled =
         telemetryEnabled === undefined ? vm.seed_policy?.telemetry_disabled === false : telemetryEnabled === true
       const vmRef = getVm(projectRoot, id) || vm
-      const changed = normalizeTelemetryRefresh(
-        telemetryFn
-          ? await telemetryFn({ projectRoot, vm: vmRef, telemetryEnabled: enabled, enabled })
-          : isNativeNodeVm(vmRef)
-            ? await slotHost(vmRef).restartTelemetry(vmRef, { enabled })
-            : vmNodeId(vm)
-              ? await restartRemoteServices(vmRef, projectRoot, { telemetryEnabled: enabled })
-              : await restartLocalServices({ projectRoot, vm: vmRef, enabled }),
-        vmRef,
-      )
+      const changed = telemetryFn
+        ? await telemetryFn({ projectRoot, vm: vmRef, telemetryEnabled: enabled, enabled })
+        : await applyNativeTelemetry({ projectRoot, vm: vmRef, routing })
       result.telemetry = changed
       if (changed?.skipped) {
         result.skipped = true
@@ -258,5 +337,35 @@ export function fleetStatus(projectRoot) {
       collected_at: fp.collected_at || vm.runtime?.identity_collected_at || null,
       source: fp.source || null,
     }
+  })
+}
+
+export async function restartLocalEgress(projectRoot, vm, opts = {}) {
+  if (isLocalEgressProxy(vm.proxy)) return { ok: true, egress: 'local' }
+  const proxyId = vm.proxy?.id
+  return runExclusiveProxyEgress(projectRoot, proxyId, async () => {
+    const running = inspectEgressProcess(projectRoot, proxyId)
+    const stopped = stopEgressProcess(projectRoot, proxyId)
+    if (!stopped.ok) return { ok: false, action: 'egress_stop_failed', error: stopped.error }
+    const pending = new Set(stopped.pending || [])
+    for (const pid of egressPidsForProxyConfig(projectRoot, proxyId)) pending.add(pid)
+    if (running.ok && running.pid) pending.add(running.pid)
+    for (const pid of pending) {
+      const exited = await waitEgressExit(pid)
+      if (!exited.ok) return { ok: false, action: 'egress_stop_failed', error: exited.error, pid }
+    }
+    const drained = await drainEgressForProxyConfig(projectRoot, proxyId)
+    if (!drained.ok) return { ok: false, action: 'egress_stop_failed', error: drained.error, pid: drained.pid }
+    const spec = running.ok ? String(running.listen_tcp || '') : readEgressListenTcp(projectRoot, proxyId)
+    const colon = spec.lastIndexOf(':')
+    const host = colon > 0 ? spec.slice(0, colon) : ''
+    const port = colon > 0 ? Number(spec.slice(colon + 1)) : 0
+    if (host && Number.isFinite(port) && port > 0) {
+      const portFree = await waitPortReleased(host, port)
+      if (!portFree.ok) return { ok: false, action: 'egress_stop_failed', error: portFree.error }
+    }
+    const started = await startProxyEgress(projectRoot, vm.proxy, opts)
+    if (!started?.ok) return { ok: false, action: 'egress_start_failed', error: started?.error || 'kin-egress failed' }
+    return { ok: true, egress: 'restarted', pid: started.pid }
   })
 }

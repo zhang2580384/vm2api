@@ -3,6 +3,7 @@ package oauth
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,14 @@ type Refresher struct {
 	inFlight  chan struct{}
 	last      Result
 	lastError error
+	OnAttempt func(Attempt)
+}
+
+type Attempt struct {
+	Type      string `json:"type"`
+	AttemptID string `json:"attempt_id"`
+	Phase     string `json:"phase"`
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 type Result struct {
@@ -121,6 +130,23 @@ func (r *Refresher) ensureLocked(ctx context.Context, force bool) (Result, error
 		}
 		if strings.TrimSpace(current.RefreshToken) == "" {
 			return &RefreshError{Code: "refresh_token_missing", Message: "credential has no refresh token"}
+		}
+		if r.OnAttempt != nil {
+			var id [16]byte
+			if _, err := cryptorand.Read(id[:]); err != nil {
+				return err
+			}
+			id[6] = (id[6] & 0x0f) | 0x40
+			id[8] = (id[8] & 0x3f) | 0x80
+			attemptID := fmt.Sprintf("%x-%x-%x-%x-%x", id[:4], id[4:6], id[6:8], id[8:10], id[10:])
+			r.OnAttempt(Attempt{Type: "oauth_attempt", AttemptID: attemptID, Phase: "start"})
+			defer func() {
+				phase, code := "failure", "refresh_failed"
+				if result.Refreshed {
+					phase, code = "success", ""
+				}
+				r.OnAttempt(Attempt{Type: "oauth_attempt", AttemptID: attemptID, Phase: phase, ErrorCode: code})
+			}()
 		}
 		refreshed, refreshErr := r.requestWithRetry(ctx, current)
 		if refreshErr != nil {

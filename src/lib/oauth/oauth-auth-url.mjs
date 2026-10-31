@@ -1,14 +1,15 @@
 /**
  * Browser OAuth-link import.
  * CAI (sub2api) and official Claude Code share PKCE + paste-code,
- * then exchange via the current VM's SOCKS5 egress. A slot bound to local
- * egress (`px-local`) arrives as `proxyUrl: ''`: its exit is the host default
- * route, so the exchange goes direct. `null` still means unbound and is refused.
+ * then exchange inside the target VM using its bound egress. proxyUrl still
+ * validates the authorize session, but production execution uses the VM context;
+ * null means unbound and is refused.
  */
 import crypto from 'node:crypto'
 import { exchangeTokenViaCookieAuth } from './cookie-auth.mjs'
 import { enrichOauthIdentity, flattenOauthIdentity } from './oauth-identity.mjs'
 import { FULL_OAUTH_SCOPE } from './oauth-contract.mjs'
+import { carryOAuthAttempt } from './guest-oauth-helper.mjs'
 
 export const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 export const SESSION_TTL_MS = 30 * 60 * 1000
@@ -162,7 +163,7 @@ function parseAuthCode(fullCode) {
   return { code: raw.slice(0, hash), state: raw.slice(hash + 1) }
 }
 
-async function exchangeCodeForToken(authCode, codeVerifier, state, proxyUrl, session) {
+async function exchangeCodeForToken(authCode, codeVerifier, state, proxyUrl, session, options) {
   const px = normalizeSocks(proxyUrl)
   if (px == null) throw fail('proxy_required', '虚拟机未绑定 SOCKS5，无法换票')
   return exchangeTokenViaCookieAuth({
@@ -172,10 +173,20 @@ async function exchangeCodeForToken(authCode, codeVerifier, state, proxyUrl, ses
     proxyUrl: px,
     redirectUri: session.redirectUri,
     tokenUrls: session.tokenUrls,
+    ...options,
   })
 }
 
-export async function exchangeAuthCode({ sessionId, code, proxyUrl, vmId, fetchImpl = null } = {}) {
+export async function exchangeAuthCode({
+  sessionId,
+  code,
+  proxyUrl,
+  vmId,
+  fetchImpl = null,
+  exec,
+  projectRoot,
+  routing,
+} = {}) {
   sweepExpired()
   const session = sessions.get(sessionId)
   if (!session || Date.now() - session.createdAt > SESSION_TTL_MS) {
@@ -184,6 +195,9 @@ export async function exchangeAuthCode({ sessionId, code, proxyUrl, vmId, fetchI
   }
   if (vmId && session.vmId && session.vmId !== String(vmId)) {
     throw fail('session_vm_mismatch', '授权会话与当前虚拟机不匹配')
+  }
+  if (exec && exec.vmId !== session.vmId) {
+    throw fail('session_vm_mismatch', '授权会话与目标执行虚拟机不匹配')
   }
   const parsed = parseAuthCode(code)
   if (!parsed.code) throw fail('code_required', '请粘贴授权码')
@@ -213,27 +227,35 @@ export async function exchangeAuthCode({ sessionId, code, proxyUrl, vmId, fetchI
   // Full OAuth paste codes carry the provider's exchange state, not necessarily
   // the authorize nonce. PKCE still binds the code to this VM's live session.
   const exchangeState = session.flavor === 'setup_token' ? parsed.state || session.state : parsed.state
-  const token = await exchangeCodeForToken(parsed.code, session.codeVerifier, exchangeState, px, session)
+  const token = await exchangeCodeForToken(parsed.code, session.codeVerifier, exchangeState, px, session, {
+    exec,
+    projectRoot,
+    routing,
+    fetchImpl,
+  })
   sessions.delete(sessionId)
   const expiresIn = Number(token.expires_in || 0)
   const now = Math.floor(Date.now() / 1000)
   const identity = flattenOauthIdentity(token)
-  return enrichOauthIdentity(
-    {
-      access_token: token.access_token,
-      refresh_token: token.refresh_token || '',
-      token_type: token.token_type || 'Bearer',
-      expires_in: expiresIn,
-      expires_at: token.expires_at || now + expiresIn,
-      scope: token.scope || session.scope,
-      email: identity.email,
-      email_address: identity.email,
-      account_uuid: identity.account_uuid,
-      org_uuid: identity.org_uuid,
-      subscription_type: identity.subscription_type,
-      source: session.source || 'oauth-auth-url',
-      flavor: session.flavor || 'cai',
-    },
-    { proxyUrl: px, fetchImpl },
+  return carryOAuthAttempt(
+    token,
+    await enrichOauthIdentity(
+      {
+        access_token: token.access_token,
+        refresh_token: token.refresh_token || '',
+        token_type: token.token_type || 'Bearer',
+        expires_in: expiresIn,
+        expires_at: token.expires_at || now + expiresIn,
+        scope: token.scope || session.scope,
+        email: identity.email,
+        email_address: identity.email,
+        account_uuid: identity.account_uuid,
+        org_uuid: identity.org_uuid,
+        subscription_type: identity.subscription_type,
+        source: session.source || 'oauth-auth-url',
+        flavor: session.flavor || 'cai',
+      },
+      { proxyUrl: px, fetchImpl },
+    ),
   )
 }

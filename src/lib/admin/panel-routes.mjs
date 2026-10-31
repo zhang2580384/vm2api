@@ -27,6 +27,7 @@ import {
   publicJevConfig,
   readJevConfig,
 } from '../protocol/jev-intercept.mjs'
+import { JevUsageRepo } from '../db/repos/jev-usage-repo.mjs'
 import { RefusalGuardsRepo } from '../db/repos/refusal-guards-repo.mjs'
 import { RefusalDeviceBlocksRepo } from '../db/repos/refusal-device-blocks-repo.mjs'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
@@ -69,6 +70,7 @@ import { officialCcHome, readOfficialCcStatus, scheduleOfficialCcBootstrap } fro
 import { invalidateLiveCredentialCache } from './panel-live-credentials.mjs'
 import { ensureCodexKernel, stopCodexKernel } from '../transport/codex-kernel-supervisor.mjs'
 import { listOfficialModels, seedModelCatalog } from '../protocol/models.mjs'
+import { jevUsageStorageErrors } from '../protocol/jev-usage.mjs'
 import { getModelPolicy, saveModelPolicy, resetModelPolicy, listPolicyModels } from '../protocol/model-policy.mjs'
 import {
   getGptModelPolicy,
@@ -184,7 +186,7 @@ import {
   SESSION_SLOT_MIN,
   validateInferenceRoutingPatch,
 } from '../vm/slot-engine.mjs'
-import { validateTelemetryRoutingPatch } from '../vm/worker-telemetry.mjs'
+import { validateTelemetryRoutingPatch } from '../vm/native-telemetry.mjs'
 import { makeError, ErrorType, ErrorCode } from '../core/errors.mjs'
 import * as panel from './panel-api.mjs'
 import { GATEWAY_CAPABILITIES } from '../vm/execution-context.mjs'
@@ -210,7 +212,6 @@ import {
   nextNumericIndex,
   padVm,
   STANDARD_LOCALE,
-  syncWorkerTelemetry,
 } from '../vm/vm-runtime.mjs'
 import {
   startSlotReady,
@@ -274,11 +275,12 @@ import {
 import { inspectClusterPayloadChanges, refreshClusterSlotPayloads } from '../cluster/remote-slot.mjs'
 import { readRawBody as defaultReadRawBody } from '../http/respond.mjs'
 import { corsHeadersForRequest } from '../http/cors.mjs'
-import { restartRustKernel, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
+import { restartRustKernel, syncClaudeKernelConfigs, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
 
 import { countTokensViaWorker } from '../transport/go-worker-client.mjs'
 import { apiKeyBetaHeader, setupTokenBetaHeader } from '../protocol/claude-code-betas.mjs'
 import { rustKernelHealth, toPublicKernelHealth } from '../transport/rust-kernel-client.mjs'
+import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
 import { codexKernelHealth } from '../transport/codex-kernel-client.mjs'
 import { normalizeHealthProbeConfig } from './health-probe.mjs'
 import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
@@ -503,17 +505,21 @@ function mergeKernelReports(local, cluster) {
   }
 }
 
-async function syncInstalledKernels({
-  project,
-  routingConfig,
-  body = {},
-  refreshCluster = refreshClusterSlotPayloads,
-}) {
+// The entrypoint auto-sync and the panel upgrade can both ask at once; a slot must not be recreated twice concurrently.
+let kernelSyncTail = Promise.resolve()
+
+function syncInstalledKernels(args) {
+  const run = kernelSyncTail.then(() => runKernelSync(args))
+  kernelSyncTail = run.catch(() => {})
+  return run
+}
+
+async function runKernelSync({ project, routingConfig, body = {}, refreshCluster = refreshClusterSlotPayloads }) {
   const all = listVms(project)
   const wanted = Array.isArray(body.ids) ? new Set(body.ids.map(String)) : null
   const selected = wanted ? all.filter((vm) => wanted.has(vm.id)) : all
   // Local slots bind the new binaries. Cluster slots bake the same kernel, CLIs
-  // and kin-worker telemetry into a content-hashed image, then recreate onto it.
+  // and OAuth helpers into a content-hashed image, then recreate onto it.
   const localVms = selected.filter((vm) => !slotHost(vm).bakedKernel)
   const clusterVms = selected.filter((vm) => slotHost(vm).bakedKernel)
   const checkOnly = body.restart === false
@@ -1181,9 +1187,9 @@ export function createPanelHandler(ctx) {
       projectRoot: cfg.paths.project,
       previousEngine: previous,
       targetEngine: target,
-      commit: () => {
+      commit: async () => {
         try {
-          return persistRoutingPatch(body)
+          return await persistRoutingPatch(body)
         } catch (error) {
           restoreRoutingRuntime(previousRoutingConfig)
           if (body.pool || body.failover) initPoolRuntime()
@@ -1244,7 +1250,7 @@ export function createPanelHandler(ctx) {
       const body = await readBody(req, cfg.limits.max_body_bytes)
       let applied
       try {
-        applied = persistRoutingPatch(body)
+        applied = await persistRoutingPatch(body)
       } catch (error) {
         if (error instanceof TypeError || error instanceof RangeError) {
           return json(res, 400, {
@@ -1460,7 +1466,7 @@ export function createPanelHandler(ctx) {
             const state = loadOnboardingState(settings)
             let next
             if (body?.action === 'profile') {
-              applyUsageProfile({
+              await applyUsageProfile({
                 mode: body?.mode,
                 persistRouting: (patch) => persistRoutingPatch(patch),
                 settings,
@@ -2412,7 +2418,7 @@ export function createPanelHandler(ctx) {
         const previous = structuredClone(ctx.routingConfig)
         try {
           if (targets.all) {
-            persistRoutingPatch({
+            await persistRoutingPatch({
               inference: {
                 ...(ctx.routingConfig.inference || {}),
                 dataplane: parsed.value,
@@ -3675,37 +3681,23 @@ export function createPanelHandler(ctx) {
         const id = p.split('/')[4]
         const vm = getVm(cfg.paths.project, id)
         if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const homeDir = path.join(cfg.paths.project, 'vms', id, 'cli-home')
-        let settings_json = null
-        let claude_setting = null
-        let kin_seed = null
-        try {
-          settings_json = JSON.parse(fs.readFileSync(path.join(homeDir, '.claude', 'settings.json'), 'utf8'))
-        } catch {}
-        try {
-          claude_setting = fs
-            .readFileSync(path.join(homeDir, '.claude', 'claude.setting'), 'utf8')
-            .replace(/\r\n?/g, '\n')
-            .replace(/\n+$/g, '')
-        } catch {
-          // Missing file stays null. The policy default is not this slot's file.
-        }
-        try {
-          kin_seed = JSON.parse(fs.readFileSync(path.join(homeDir, '.claude', 'kin-seed.json'), 'utf8'))
-        } catch {}
+        const observed = await readSeedSettings(cfg.paths.project, vm)
         const seed_policy = defaultSeedPolicy(vm.seed_policy || {})
-        if (claude_setting !== null) seed_policy.claude_setting = claude_setting
         const debug = new URL(req.url || '/', 'http://localhost').searchParams.get('debug') === '1'
         const payload = {
           vm_id: id,
           seed_policy,
           ...seedTelemetryContract(seed_policy),
-          settings_json,
-          claude_setting,
-          kin_seed,
-          cli_home: homeDir,
+          ...observed,
         }
-        if (debug) payload.telemetry_log = readTelemetryUploadLog(cfg.paths.project, id)
+        if (debug) {
+          try {
+            payload.telemetry_log = await readTelemetryUploadLog(cfg.paths.project, vm)
+          } catch {
+            payload.telemetry_log = []
+            payload.telemetry_log_error = 'telemetry_log_unavailable'
+          }
+        }
         return json(res, 200, panel.ok(payload))
       }
       // PUT /api/panel/vms/:id/seed-settings
@@ -3714,101 +3706,168 @@ export function createPanelHandler(ctx) {
         const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
         if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
         const body = await readBody(req, 256 * 1024)
-        const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        const telemetryWasOff = !isTelemetryEnabled(vm.seed_policy || {})
-        const merged = { ...(vm.seed_policy || {}), ...(body.seed_policy || {}) }
-        for (const k of ['telemetry_disabled', 'reject_client_settings', 'reject_client_metadata_identity']) {
-          if (body[k] !== undefined) merged[k] = !!body[k]
-        }
-        if (body.theme !== undefined) merged.theme = body.theme
-        if (body.extra_env !== undefined) merged.extra_env = body.extra_env
-        if (body.settings_json_override !== undefined) merged.settings_json_override = body.settings_json_override
-        if (body.claude_setting !== undefined) merged.claude_setting = body.claude_setting
-        if (body['claude.setting'] !== undefined) merged.claude_setting = body['claude.setting']
-        const next = defaultSeedPolicy(merged)
-        if (body.settings_json_override !== undefined) next.settings_json_override = body.settings_json_override
-        if (body.extra_env !== undefined) next.extra_env = body.extra_env || {}
-        const followProxyTz = body?.timezone_follow_proxy === true || body?.timezoneFollowProxy === true
-        const hasTimezone = body && Object.prototype.hasOwnProperty.call(body, 'timezone')
-        const hasLocale = body && Object.prototype.hasOwnProperty.call(body, 'locale')
-        let nextLocale = null
-        if (hasLocale) {
-          const requestedLocale = body.locale == null || body.locale === '' ? STANDARD_LOCALE : String(body.locale)
-          if (!SLOT_LOCALES.includes(requestedLocale)) {
-            return json(res, 400, {
+        return await withVmLock(`seed-settings:${vmPath}`, async () => {
+          let vm = getVm(cfg.paths.project, id)
+          if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
+          const patch = { ...(body.seed_policy || {}) }
+          for (const key of [
+            'telemetry_disabled',
+            'reject_client_settings',
+            'reject_client_metadata_identity',
+            'theme',
+            'extra_env',
+            'settings_json_override',
+            'claude_setting',
+          ]) {
+            if (Object.hasOwn(body, key)) patch[key] = body[key]
+          }
+          if (Object.hasOwn(body, 'claude.setting')) patch.claude_setting = body['claude.setting']
+          if (
+            isCodexVm(vm) ||
+            (slotHost(vm).native && isTelemetryEnabled(defaultSeedPolicy({ ...(vm.seed_policy || {}), ...patch })))
+          ) {
+            return json(res, 409, {
               ok: false,
-              error: { code: 'invalid_locale', message: `语言必须是 ${SLOT_LOCALES.join('、')}` },
+              error: { code: 'telemetry_unsupported', message: '此槽不支持 VM 原生遥测' },
             })
           }
-          nextLocale = requestedLocale
-        }
-        if (hasTimezone) {
-          const zone = validTimezone(body.timezone)
-          if (!zone) {
-            return json(res, 400, {
+          const followProxyTz = body.timezone_follow_proxy === true || body.timezoneFollowProxy === true
+          const hasTimezone = Object.hasOwn(body, 'timezone')
+          const hasLocale = Object.hasOwn(body, 'locale')
+          let timezone = null
+          let locale = null
+          if (hasLocale) {
+            locale = body.locale == null || body.locale === '' ? STANDARD_LOCALE : String(body.locale)
+            if (!SLOT_LOCALES.includes(locale)) {
+              return json(res, 400, {
+                ok: false,
+                error: { code: 'invalid_locale', message: `语言必须是 ${SLOT_LOCALES.join('、')}` },
+              })
+            }
+          }
+          if (hasTimezone) {
+            timezone = validTimezone(body.timezone)
+            if (!timezone) {
+              return json(res, 400, {
+                ok: false,
+                error: {
+                  type: 'invalid_request_error',
+                  code: 'invalid_timezone',
+                  message: '时区必须是有效的 IANA 名称，如 Asia/Tokyo',
+                  param: 'timezone',
+                },
+              })
+            }
+          } else if (followProxyTz) {
+            const route = JSON.stringify({ node_id: vm.node_id, proxy: vm.proxy })
+            const synced = await syncVmTimezoneFromProxy(cfg.paths.project, proxyPool, id, {
+              force: true,
+              persist: false,
+            })
+            if (!synced.ok) {
+              return json(res, 400, {
+                ok: false,
+                error: {
+                  type: 'invalid_request_error',
+                  code: synced.reason || 'proxy_timezone_unknown',
+                  message: '未能从代理节点取到时区，请先检测代理地理位置',
+                },
+              })
+            }
+            vm = getVm(cfg.paths.project, id)
+            if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
+            if (route !== JSON.stringify({ node_id: vm.node_id, proxy: vm.proxy })) {
+              return json(res, 409, {
+                ok: false,
+                error: { code: 'proxy_binding_changed', message: '代理绑定已变化，请重新保存时区设置' },
+              })
+            }
+            timezone = synced.timezone
+          }
+          // Only patch owned fields on the latest record, never an object held across geo/publication awaits.
+          vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+          const next = defaultSeedPolicy({ ...(vm.seed_policy || {}), ...patch })
+          const unsupported = slotHost(vm).native || isCodexVm(vm)
+          if (isCodexVm(vm) || (unsupported && isTelemetryEnabled(next))) {
+            return json(res, 409, {
               ok: false,
-              error: {
-                type: 'invalid_request_error',
-                code: 'invalid_timezone',
-                message: '时区必须是有效的 IANA 名称，如 Asia/Tokyo',
-                param: 'timezone',
-              },
+              error: { code: 'telemetry_unsupported', message: '此槽不支持 VM 原生遥测' },
             })
           }
-          const pinned = persistVmTimezone(cfg.paths.project, id, zone, { source: 'manual' })
-          if (!pinned) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-          Object.assign(vm, pinned)
-        } else if (followProxyTz) {
-          const synced = await syncVmTimezoneFromProxy(cfg.paths.project, proxyPool, id, { force: true })
-          if (!synced.ok) {
-            return json(res, 400, {
-              ok: false,
-              error: {
-                type: 'invalid_request_error',
-                code: synced.reason || 'proxy_timezone_unknown',
-                message: '未能从代理节点取到时区，请先检测代理地理位置',
-              },
+          if (timezone) {
+            vm.timezone = timezone
+            vm.timezone_source = hasTimezone ? 'manual' : 'proxy_geo'
+            if (vm.fingerprint && typeof vm.fingerprint === 'object') vm.fingerprint.timezone = timezone
+          }
+          if (locale) vm.locale = locale
+          vm.seed_policy = next
+          vm.updated_at = new Date().toISOString()
+          atomicWriteJson(vmPath, vm, { mode: 0o600 })
+          let service
+          if (unsupported) {
+            service = await withVmLock(`seed-publication:${vmPath}`, async () => {
+              const outcome = {
+                ok: false,
+                wrote: false,
+                supported: false,
+                state: 'unsupported',
+                published: false,
+                applied: false,
+              }
+              const revision = (record) =>
+                JSON.stringify([record.node_id, record.runtime, record.seed_policy, record.timezone, record.locale])
+              try {
+                const host = slotHost(vm)
+                const existing = await host.seedFiles(vm, path.join(cfg.paths.project, 'vms', id))
+                const fresh = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+                if (revision(fresh) !== revision(vm)) throw new Error('seed_publication_superseded')
+                outcome.seed = writeSlotSeedFiles(cfg.paths.project, fresh, null, {
+                  existingSettings:
+                    existing.files['settings.json'] === null ? {} : JSON.parse(existing.files['settings.json']),
+                  replaceEnv: Object.hasOwn(body, 'extra_env') || Object.hasOwn(body, 'settings_json_override'),
+                })
+                outcome.wrote = outcome.seed.wrote === true
+                const result = await host.syncSeed(fresh, path.join(cfg.paths.project, 'vms', id))
+                outcome.published = result.published === true
+                if (revision(JSON.parse(fs.readFileSync(vmPath, 'utf8'))) !== revision(fresh))
+                  throw new Error('seed_publication_superseded')
+                outcome.ok = outcome.published
+              } catch {
+                outcome.code = 'seed_publish_failed'
+                outcome.error = '槽位种子配置尚未确认发布'
+              }
+              return outcome
+            })
+          } else {
+            service = await applyNativeTelemetry({
+              projectRoot: cfg.paths.project,
+              vm,
+              routing: ctx.routingConfig,
+              replaceEnv: Object.hasOwn(body, 'extra_env') || Object.hasOwn(body, 'settings_json_override'),
             })
           }
-          if (synced.applied) {
-            const fresh = getVm(cfg.paths.project, id)
-            if (fresh) Object.assign(vm, fresh)
-          } else if (synced.timezone) {
-            vm.timezone = synced.timezone
-            vm.timezone_source = 'proxy_geo'
-          }
-        }
-        if (nextLocale) vm.locale = nextLocale
-        vm.seed_policy = next
-        vm.updated_at = new Date().toISOString()
-        atomicWriteJson(vmPath, vm, { mode: 0o600 })
-        const written = writeSlotSeedFiles(cfg.paths.project, vm, next)
-        let service = null
-        if (
-          vm.status === 'running' &&
-          (next.telemetry_disabled !== telemetryWasOff || body.telemetry_service_restart === true)
-        ) {
-          const report = await runFleetUpdate(cfg.paths.project, {
-            action: 'telemetry',
-            ids: [id],
-            concurrency: 1,
-            routing: ctx.routingConfig,
-          })
-          service = report.items?.[0] || report
-        }
-        return json(
-          res,
-          200,
-          panel.ok({
+          const { seed: written, ...publicService } = service
+          const data = {
             vm_id: id,
             seed_policy: next,
             ...seedTelemetryContract(next),
-            settings_json: written.settings || null,
-            claude_setting: written.claude_setting || '',
-            kin_seed: written.kin_seed || null,
-            service,
-          }),
-        )
+            saved: true,
+            published: service.published === true,
+            applied: service.applied === true,
+            settings_json: written?.settings || null,
+            claude_setting: written?.claude_setting ?? null,
+            kin_seed: written?.kin_seed || null,
+            service: publicService,
+          }
+          if (!service.ok) {
+            return json(res, 502, {
+              ok: false,
+              error: { code: service.code || 'telemetry_not_applied', message: service.error || 'VM 原生配置尚未生效' },
+              data,
+            })
+          }
+          return json(res, 200, panel.ok(data))
+        })
       }
 
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/wrap-cli\/promote$/.test(p)) {
@@ -4445,7 +4504,7 @@ export function createPanelHandler(ctx) {
       }
 
       // POST /api/panel/vms/import
-      // workflow: create VM → allocate proxy → import sessionKey (via SOCKS) → start
+      // workflow: create VM → allocate proxy → start guest/CLI → exchange in guest → import
       if (req.method === 'POST' && p === '/api/panel/vms/import') {
         const body = await readBody(req, 1024 * 1024)
         const sessionKey = body.sessionKey || body.session_key || body.sid || ''
@@ -4543,6 +4602,9 @@ export function createPanelHandler(ctx) {
             oauth = await sessionKeyToOAuth(String(sessionKey).trim(), {
               proxyUrl,
               scope: inference ? 'inference' : 'full',
+              exec: slotExec(cfg.paths.project, existing),
+              projectRoot: cfg.paths.project,
+              routing: ctx.routingConfig,
             })
             if (inference) {
               oauth.type = 'setup-token'
@@ -4604,6 +4666,7 @@ export function createPanelHandler(ctx) {
               oauth_email: existing.claude.email,
               has_refresh: existing.claude.has_refresh,
               official_cc_bootstrap: committed.official_cc_bootstrap || null,
+              ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
             }),
           )
         } catch (e) {
@@ -4650,6 +4713,7 @@ export function createPanelHandler(ctx) {
             const generated = await startClaudeAuthLoginSession({
               vm: existing,
               projectRoot: cfg.paths.project,
+              routing: ctx.routingConfig,
               force: body.force === true || body.force === 'true' || body.force === 1,
             })
             const px = existing.proxy || {}
@@ -4776,6 +4840,9 @@ export function createPanelHandler(ctx) {
                   code,
                   proxyUrl: slotProxy.proxyUrl,
                   vmId: id,
+                  exec: slotExec(cfg.paths.project, existing),
+                  projectRoot: cfg.paths.project,
+                  routing: ctx.routingConfig,
                 })
           if (looksLikeOfficialSetupToken(code) || oauth.flavor === SETUP_TOKEN_FLAVOR) {
             oauth.type = 'official-setup-token'
@@ -4815,6 +4882,7 @@ export function createPanelHandler(ctx) {
               oauth_email: existing.claude?.email,
               has_refresh: existing.claude?.has_refresh,
               official_cc_bootstrap: committed.official_cc_bootstrap || null,
+              ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
               source: oauth.source || 'oauth-auth-url',
               flavor: oauth.flavor || null,
             }),
@@ -4893,6 +4961,7 @@ export function createPanelHandler(ctx) {
             oauth_email: existing.claude?.email || null,
             has_refresh: existing.claude?.has_refresh,
             official_cc_bootstrap: committed.official_cc_bootstrap || null,
+            ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
           }),
         )
       }
@@ -4973,6 +5042,7 @@ export function createPanelHandler(ctx) {
             oauth_email: existing.claude?.email || null,
             has_refresh: existing.claude?.has_refresh,
             official_cc_bootstrap: committed.official_cc_bootstrap || null,
+            ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
           }),
         )
       }
@@ -5152,6 +5222,7 @@ export function createPanelHandler(ctx) {
         }
         const saved = saveModelPolicy(body.policy || body)
         seedModelCatalog()
+        syncClaudeKernelConfigs(cfg.paths.project, ctx.routingConfig)
         return json(
           res,
           200,
@@ -5184,6 +5255,7 @@ export function createPanelHandler(ctx) {
         }
         const saved = resetModelPolicy()
         seedModelCatalog()
+        syncClaudeKernelConfigs(cfg.paths.project, ctx.routingConfig)
         return json(
           res,
           200,
@@ -5382,7 +5454,7 @@ export function createPanelHandler(ctx) {
         const { applied: appliedDuringSwitch, ...publicEngineRuntime } = engineRuntime
         let applied
         try {
-          applied = appliedDuringSwitch ?? persistRoutingPatch(body)
+          applied = appliedDuringSwitch ?? (await persistRoutingPatch(body))
         } catch (error) {
           restoreRoutingRuntime(previousRoutingConfig)
           return json(res, 503, {
@@ -5495,6 +5567,26 @@ export function createPanelHandler(ctx) {
       }
       if (req.method === 'GET' && p === '/api/panel/protocol-entry') {
         return json(res, 200, panel.ok(requestLog.protocolEntryStats()))
+      }
+      if (req.method === 'GET' && p === '/api/panel/jev-usage') {
+        if (panelIdentity(req).role !== 'admin')
+          return json(res, 403, { ok: false, error: { code: 'forbidden', message: '仅管理员可查看审核用量' } })
+        try {
+          const repo = new JevUsageRepo()
+          const page = repo.list(Object.fromEntries(url.searchParams))
+          return json(
+            res,
+            200,
+            panel.ok({ ...repo.overview(), ...page, storage_errors_since_start: jevUsageStorageErrors() }),
+          )
+        } catch (error) {
+          if (error instanceof TypeError)
+            return json(res, 400, {
+              ok: false,
+              error: { code: 'invalid_jev_usage_query', message: '用量查询参数不正确' },
+            })
+          throw error
+        }
       }
       if (req.method === 'GET' && p === '/api/panel/jev-intercept') {
         return json(res, 200, panel.ok(jevInterceptSnapshot()))
@@ -6074,12 +6166,79 @@ export function createPanelHandler(ctx) {
   }
 }
 
-function readTelemetryUploadLog(projectRoot, id) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/.test(String(id || ''))) return []
-  try {
-    const text = fs.readFileSync(path.join(projectRoot, 'vms', id, 'run', 'telemetry-upload.log'), 'utf8')
-    return text.split(/\r?\n/).filter(Boolean).slice(-40)
-  } catch {
-    return []
+async function readSeedSettings(projectRoot, vm) {
+  const host = slotHost(vm)
+  const result = {
+    settings_json: null,
+    claude_setting: null,
+    kin_seed: null,
+    cli_home: null,
+    seed_files: {
+      ok: false,
+      source: host.kind,
+      files: { settings_json: 'error', claude_setting: 'error', kin_seed: 'error' },
+    },
   }
+  try {
+    const observed = await host.seedFiles(vm, path.join(projectRoot, 'vms', vm.id))
+    result.cli_home = observed.cli_home
+    let failed = false
+    for (const [key, name] of [
+      ['settings_json', 'settings.json'],
+      ['claude_setting', 'claude.setting'],
+      ['kin_seed', 'kin-seed.json'],
+    ]) {
+      const text = observed.files[name]
+      if (text === null) {
+        result.seed_files.files[key] = 'missing'
+        continue
+      }
+      try {
+        const value = key === 'claude_setting' ? text.replace(/\r\n?/g, '\n').replace(/\n+$/g, '') : JSON.parse(text)
+        if (key !== 'claude_setting' && (!value || typeof value !== 'object' || Array.isArray(value)))
+          throw new Error('seed_file_invalid')
+        result[key] = value
+        result.seed_files.files[key] = 'present'
+      } catch {
+        failed = true
+      }
+    }
+    result.seed_files.ok = !failed
+    if (failed) result.seed_files.error = 'seed_file_invalid'
+  } catch {
+    result.seed_files.error = 'seed_files_unavailable'
+  }
+  return result
+}
+
+async function readTelemetryUploadLog(projectRoot, vm) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/.test(String(vm?.id || ''))) return []
+  const text = await slotHost(vm).telemetryLog(vm, path.join(projectRoot, 'vms', vm.id))
+  return String(text)
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .slice(-40)
+    .flatMap((line) => {
+      try {
+        const record = JSON.parse(line)
+        if (
+          typeof record?.at !== 'string' ||
+          typeof record?.ok !== 'boolean' ||
+          !Number.isSafeInteger(record?.events) ||
+          record.events < 0
+        )
+          return []
+        return [
+          JSON.stringify({
+            at: record.at,
+            ok: record.ok,
+            events: record.events,
+            error:
+              typeof record.error === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(record.error) ? record.error : null,
+          }),
+        ]
+      } catch {
+        return []
+      }
+    })
 }

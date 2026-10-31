@@ -16,6 +16,7 @@ import {
   CRS_OFFICIAL_SYSTEM,
   CRS_OFFICIAL_AGENT_PROMPT,
   CRS_SYSTEM_EXPANSION,
+  callerSystemBlocksWithoutBilling,
   normalizePersonaMode,
 } from './crs-persona.mjs'
 import { CRS_OFFICIAL_CONTINUATION } from './official-cc-system-2.1.241.mjs'
@@ -98,7 +99,7 @@ function isOfficialPersonaText(text) {
   return false
 }
 
-export function officialPersonaText(system) {
+function officialPersonaTexts(system) {
   const out = []
   for (const t of extractSystemTexts(system)) {
     if (isOfficialPersonaText(t)) {
@@ -120,7 +121,11 @@ export function officialPersonaText(system) {
     out.push(CRS_OFFICIAL_SYSTEM)
     if (t.includes(CRS_SYSTEM_EXPANSION)) out.push(CRS_SYSTEM_EXPANSION)
   }
-  return out.join('')
+  return out
+}
+
+export function officialPersonaText(system) {
+  return officialPersonaTexts(system).join('')
 }
 
 function stripKnownTexts(text, known) {
@@ -172,25 +177,30 @@ export function injectedOverlayText(before, after) {
   return parts.join('\n\n')
 }
 
-function officialHideTokens(before, after) {
-  if (!after || before === after) return 0
-  const afterOfficial = officialPersonaText(after.system)
-  if (!afterOfficial) return 0
-  const beforeOfficial = officialPersonaText(before?.system)
-  if (afterOfficial === beforeOfficial) return 0
-  return estimateClaudeInputTokens(afterOfficial)
+function callerOfficialTexts(system) {
+  // Zero can replace billing lines inside a caller text block. Compare the
+  // retained text against the same normalized source, as well as the original.
+  return new Set([...officialPersonaTexts(system), ...officialPersonaTexts(callerSystemBlocksWithoutBilling(system))])
 }
 
-function officialUncachedText(system) {
+function officialHideTokens(before, after) {
+  if (!after || before === after) return 0
+  const callerTexts = callerOfficialTexts(before?.system)
+  const added = officialPersonaTexts(after.system).filter((text) => !callerTexts.has(text))
+  return estimateClaudeInputTokens(added.join(''))
+}
+
+function officialUncachedText(system, callerTexts) {
   if (!system) return ''
-  if (typeof system === 'string') {
-    return isOfficialPersonaText(system) ? system : officialPersonaText(system)
+  if (!Array.isArray(system)) {
+    return officialPersonaTexts(system)
+      .filter((text) => !callerTexts.has(text))
+      .join('')
   }
-  if (!Array.isArray(system)) return officialPersonaText(system)
   const parts = []
   for (const block of system) {
     const text = typeof block === 'string' ? block : block?.text || ''
-    if (!text || !isOfficialPersonaText(text)) continue
+    if (!text || !isOfficialPersonaText(text) || callerTexts.has(text)) continue
     if (block && typeof block === 'object' && block.cache_control) continue
     parts.push(text)
   }
@@ -256,10 +266,10 @@ export function injectedToolsHideTokens(before, after) {
 
 function officialUncachedTokens(before, after) {
   if (!after || before === after) return 0
-  const afterText = officialUncachedText(after.system)
-  if (!afterText) return 0
-  const beforeText = officialUncachedText(before?.system)
-  if (afterText === beforeText) return 0
+  // Retained caller text is never an injected cost, even if its headings look
+  // official or its cache marker changed during request preparation.
+  const callerTexts = callerOfficialTexts(before?.system)
+  const afterText = officialUncachedText(after.system, callerTexts)
   return estimateClaudeInputTokens(afterText)
 }
 

@@ -112,16 +112,12 @@ test('native payload names the missing or foreign file and hashes content', (t) 
   assert.equal(remoteNativePayloadDir('/Users/u/.vm2api', 'abc'), '/Users/u/.vm2api/native/abc')
 })
 
-test('launchd plists run the kernel and sidecar from the slot tree with escaped values', () => {
+test('launchd kernel plist escapes slot paths and environment values', () => {
   const p = nativeSlotPaths('/Users/o&b/.vm2api', 'vm-07', 'd1g3st')
   assert.equal(p.payload, '/Users/o&b/.vm2api/native/d1g3st')
   assert.equal(p.claude, '/Users/o&b/.vm2api/vms/vm-07/claude')
   const vm = { id: 'vm-07', timezone: 'Asia/Tokyo', locale: 'ja_JP.UTF-8' }
   const plists = nativeServicePlists(vm, p)
-  assert.deepEqual(nativeLabels('vm-07'), {
-    kernel: 'com.vm2api.slot.vm-07.kernel',
-    telemetry: 'com.vm2api.slot.vm-07.telemetry',
-  })
   assert.equal(plists.kernel.path, '/Users/o&b/.vm2api/vms/vm-07/launchd/com.vm2api.slot.vm-07.kernel.plist')
   const kernel = plists.kernel.body
   assert.match(kernel, /<string>\/Users\/o&amp;b\/\.vm2api\/native\/d1g3st\/kin-kernel<\/string>/)
@@ -134,9 +130,6 @@ test('launchd plists run the kernel and sidecar from the slot tree with escaped 
   assert.match(kernel, /<key>KeepAlive<\/key>\s*<true\/>/)
   assert.match(kernel, /<key>Umask<\/key>\s*<integer>63<\/integer>/)
   assert.doesNotMatch(kernel, /o&b/, 'raw ampersand must be escaped')
-  const telemetry = plists.telemetry.body
-  assert.match(telemetry, /<string>telemetry<\/string>/)
-  assert.match(telemetry, /<key>SuccessfulExit<\/key>\s*<false\/>/)
   assert.match(renderPlist({ a: '<x y="1">' }), /<string>&lt;x y=&quot;1&quot;&gt;<\/string>/)
 })
 

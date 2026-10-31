@@ -24,7 +24,7 @@ export const STAGES: { id: StageId; name: string; does: string }[] = [
   {
     id: 'jev',
     name: '决策模型',
-    does: '把正文交给安全模型逐题打分，低于阈值就拦。',
+    does: '三题各自打分，任一题低于阈值就拦。色情命中会封设备。',
   },
 ]
 

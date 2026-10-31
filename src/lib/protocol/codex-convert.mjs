@@ -296,7 +296,7 @@ export function normalizeCodexResponsesInput(body = {}) {
 
 export function anthropicToCodexResponses(body = {}) {
   const messages = Array.isArray(body.messages) ? body.messages : []
-  const system = typeof body.system === 'string' ? [{ role: 'system', content: body.system }] : []
+  const system = body.system == null || body.system === '' ? [] : [{ role: 'system', content: body.system }]
   return chatToCodexResponses({
     model: body.model,
     messages: [...system, ...messages],

@@ -5,7 +5,6 @@ import {
   formatDuration,
   formatTokenAmount,
   isNonBillingEndpoint,
-  shouldHideOutputRate,
 } from './usage-format'
 
 describe('formatTokenAmount', () => {
@@ -33,22 +32,24 @@ describe('formatDuration', () => {
     expect(formatDuration(null)).toBe('-')
     expect(formatDuration(850)).toBe('850ms')
     expect(formatDuration(1234)).toBe('1.23s')
+    expect(formatDuration(-5)).toBe('-')
+    expect(formatDuration(Number.NaN)).toBe('-')
   })
 })
 
 describe('output rate', () => {
-  it('measures from first token to completion', () => {
-    expect(calculateOutputRate(100, 3000, 1000)).toBe(50)
-    expect(calculateOutputRate(0, 3000, 1000)).toBeNull()
-    expect(calculateOutputRate(100, 3000, null)).toBeNull()
-    expect(calculateOutputRate(100, 1000, 1000)).toBeNull()
+  it('divides output tokens by the measured generation window', () => {
+    expect(calculateOutputRate(100, 2000)).toBe(50)
+    expect(calculateOutputRate(621, 15488)?.toFixed(1)).toBe('40.1')
   })
 
-  it('hides implausible rates from buffered streams', () => {
-    const rate = calculateOutputRate(1000, 10_000, 9_950)
-    expect(rate).toBe(20_000)
-    expect(shouldHideOutputRate(rate, 10_000, 9_950)).toBe(true)
-    expect(shouldHideOutputRate(50, 3000, 1000)).toBe(false)
+  it('stays unavailable without a measured positive window', () => {
+    expect(calculateOutputRate(621, null)).toBeNull()
+    expect(calculateOutputRate(621, 0)).toBeNull()
+    expect(calculateOutputRate(621, -8)).toBeNull()
+    expect(calculateOutputRate(621, Number.POSITIVE_INFINITY)).toBeNull()
+    expect(calculateOutputRate(0, 15488)).toBeNull()
+    expect(calculateOutputRate(Number.NaN, 15488)).toBeNull()
   })
 })
 

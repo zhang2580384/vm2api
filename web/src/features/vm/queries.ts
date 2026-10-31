@@ -62,6 +62,9 @@ export function vmSeedUploadLogQueryOptions(id: string) {
       const data = await api<VmSeedSettings>(
         `/api/panel/vms/${encodeURIComponent(id)}/seed-settings?debug=1`
       )
+      if (data.telemetry_log_error) {
+        throw new Error('所在 VM 的原生计数记录暂不可读取')
+      }
       const lines = data.telemetry_log
       return Array.isArray(lines)
         ? lines.filter(

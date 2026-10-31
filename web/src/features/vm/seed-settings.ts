@@ -2,10 +2,12 @@ import type { VmKernelSnapshot, VmSeedSettings } from '@/types/panel-vm'
 import {
   telemetryEnabled,
   telemetrySeedFlags,
-  telemetryView,
   type TelemetrySeedFlags,
 } from '@/features/vm/telemetry-policy'
-import { telemetryStatusLabel } from '@/features/vm/telemetry-status'
+import {
+  telemetryPolicyConfirmed,
+  telemetryStatusLabel,
+} from '@/features/vm/telemetry-status'
 
 export const REJECT_FLAGS = [
   ['reject_client_settings', '拒客户端 settings'],
@@ -125,9 +127,6 @@ export function settingsEnv(
   for (const [key, value] of Object.entries(env)) {
     out[key] = value == null ? '' : String(value)
   }
-  if (!('CLAUDE_CODE_ATTRIBUTION_HEADER' in out)) {
-    out.CLAUDE_CODE_ATTRIBUTION_HEADER = '0'
-  }
   return out
 }
 
@@ -197,9 +196,11 @@ export function seedDraftOf(
 }
 
 export function sameDraft(a: SeedDraft, b: SeedDraft): boolean {
-  const keys = new Set([...Object.keys(a.env), ...Object.keys(b.env)])
+  const left = editableSeedEnv(a.env)
+  const right = editableSeedEnv(b.env)
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)])
   for (const key of keys) {
-    if ((a.env[key] ?? '') !== (b.env[key] ?? '')) return false
+    if ((left[key] ?? '') !== (right[key] ?? '')) return false
   }
   return (
     a.theme === b.theme &&
@@ -213,46 +214,76 @@ export function sameDraft(a: SeedDraft, b: SeedDraft): boolean {
   )
 }
 
-/** Body for PUT /seed-settings. Mirrors follow the telemetry bit. */
-export function seedSaveBody(draft: SeedDraft): Record<string, unknown> {
-  const body: Record<string, unknown> = {
-    ...telemetrySeedFlags(telemetryEnabled(draft)),
-    claude_setting: draft.claude_setting.replace(/\n+$/g, ''),
-    reject_client_settings: draft.reject_client_settings,
-    reject_client_metadata_identity: draft.reject_client_metadata_identity,
-    extra_env: editableSeedEnv(draft.env),
-    theme: draft.theme,
-    locale: draft.locale,
+/** Only explicit edits are sent; a stale draft must not reopen telemetry. */
+export function seedSaveBody(
+  draft: SeedDraft,
+  baseline: SeedDraft
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {}
+  if (telemetryEnabled(draft) !== telemetryEnabled(baseline)) {
+    Object.assign(body, telemetrySeedFlags(telemetryEnabled(draft)))
   }
-  if (draft.timezoneFollow) body.timezone_follow_proxy = true
-  else if (draft.timezoneFixed) body.timezone = draft.timezoneFixed
+  for (const key of [
+    'reject_client_settings',
+    'reject_client_metadata_identity',
+  ] as const) {
+    if (draft[key] !== baseline[key]) body[key] = draft[key]
+  }
+  if (draft.claude_setting !== baseline.claude_setting) {
+    body.claude_setting = draft.claude_setting.replace(/\n+$/g, '')
+  }
+  const env = editableSeedEnv(draft.env)
+  const previousEnv = editableSeedEnv(baseline.env)
+  const envKeys = new Set([...Object.keys(env), ...Object.keys(previousEnv)])
+  if ([...envKeys].some((key) => env[key] !== previousEnv[key]))
+    body.extra_env = env
+  if (draft.theme !== baseline.theme) body.theme = draft.theme
+  if (draft.locale !== baseline.locale) body.locale = draft.locale
+  if (
+    draft.timezoneFollow !== baseline.timezoneFollow ||
+    (!draft.timezoneFollow && draft.timezoneFixed !== baseline.timezoneFixed)
+  ) {
+    if (draft.timezoneFollow) body.timezone_follow_proxy = true
+    else if (draft.timezoneFixed) body.timezone = draft.timezoneFixed
+  }
   return body
 }
 
+export function seedSaveState(
+  value: unknown
+): 'applied' | 'published' | 'saved' | 'unsupported' | 'unknown' {
+  const result = asRecord(value)
+  const service = asRecord(result?.service)
+  if (service?.supported === false) return 'unsupported'
+  if (result?.applied === true || service?.applied === true) return 'applied'
+  if (result?.published === true || service?.published === true)
+    return 'published'
+  if (result?.saved === true) return 'saved'
+  return 'unknown'
+}
+
 export type TelemetryLive = {
+  desired: boolean | null
   on: boolean | null
-  running: boolean | null
+  confirmed: boolean
   label: string
   tone: 'on' | 'off' | 'unknown'
 }
 
-/**
- * Live lamp. `running` is the process probe and is never rewritten into
- * on/off. Configured on/off comes from the seed bit when a policy exists.
- */
+/** Policy intent and native observations are independent; neither invents a PID. */
 export function telemetryLive(
   seed: VmSeedSettings | null | undefined,
   observed: ObservedTelemetry | null | undefined
 ): TelemetryLive {
   const policy = asRecord(seed?.seed_policy)
-  const view = telemetryView(policy, observed)
-  const enabled = view?.enabled
-  const running = observed?.running
-  const on = enabled === true ? true : enabled === false ? false : null
+  const desired = policy ? telemetryEnabled(policy) : null
+  const confirmed =
+    desired !== null && telemetryPolicyConfirmed(observed, desired)
   return {
-    on,
-    running: typeof running === 'boolean' ? running : null,
-    label: telemetryStatusLabel(view),
-    tone: on === true ? 'on' : on === false ? 'off' : 'unknown',
+    desired,
+    on: observed?.enabled ?? null,
+    confirmed,
+    label: telemetryStatusLabel(observed, desired),
+    tone: confirmed ? (desired ? 'on' : 'off') : 'unknown',
   }
 }

@@ -27,6 +27,7 @@ export const DEFAULT_NOTIFY = Object.freeze({
     invalid: true,
     account_down: false,
     account_up: false,
+    vm_down: true,
   }),
   email: Object.freeze({
     enabled: false,
@@ -59,6 +60,7 @@ const EVENT_TITLES = {
   pool_recovered: '账号池已恢复',
   account_down: '账号变为不可用',
   account_up: '账号恢复可用',
+  vm_down: 'VM / 节点下线',
   digest: '账号池汇报',
   revoked: '发现新吊销',
   invalid: '发现失效凭证',
@@ -125,6 +127,7 @@ export function normalizeNotifyConfig(raw = {}) {
       invalid: asBool(evSrc.invalid, true),
       account_down: asBool(evSrc.account_down, false),
       account_up: asBool(evSrc.account_up, false),
+      vm_down: asBool(evSrc.vm_down, true),
     },
     email: {
       enabled: asBool(emailSrc.enabled, false),
@@ -352,6 +355,19 @@ export function detectPoolNotifyEvents(prev, next, cfg = DEFAULT_NOTIFY) {
     }
   }
 
+  if (ev.vm_down) {
+    const previousVms = new Map((prev?.vms || []).map((vm) => [vm.id, vm]))
+    for (const vm of next.vms || []) {
+      if (vm.online !== false) continue
+      const old = previousVms.get(vm.id)
+      // Existing stopped slots at startup are not new outages. A failed node
+      // link or terminal kernel fault is actionable even on the first check.
+      if (old?.online === true || (!old && ['node_offline', 'kernel_faulted'].includes(vm.reason))) {
+        events.push({ type: 'vm_down', title: EVENT_TITLES.vm_down, ...vm })
+      }
+    }
+  }
+
   const before = accountMap(prev)
   const after = accountMap(next)
   if (ev.account_down) {
@@ -467,6 +483,11 @@ export function formatNotifyMessage(event, snap, cfg = DEFAULT_NOTIFY, baseUrl =
   }
   if (event?.id) {
     lines.push(`${event.id}${event.email ? ' ' + event.email : ''} ${event.status || ''}`.trim())
+  }
+  if (event?.type === 'vm_down') {
+    lines.push(`节点 ${event.node_id || '本机'}`)
+    lines.push(`原因 ${event.reason}${event.detail ? ': ' + event.detail : ''}`)
+    lines.push('该 VM 当前不可连通，已退出调度。')
   }
   if (event?.ids?.length) {
     lines.push(`新增 ${event.count || event.ids.length} 个`)
@@ -790,21 +811,21 @@ export async function dispatchNotify(cfg, message, opts = {}) {
   const ready = notifyChannelsReady(cfg)
   if (!ready.any) return { ok: false, error: 'no_channel', results: [] }
   const results = []
-  if (ready.email) {
+  if (ready.email && (!opts.channels || opts.channels.includes('email'))) {
     try {
       results.push(await sendEmailNotify(cfg, message, opts))
     } catch (err) {
       results.push({ ok: false, channel: 'email', error: String(err?.message || err).slice(0, 180) })
     }
   }
-  if (ready.telegram) {
+  if (ready.telegram && (!opts.channels || opts.channels.includes('telegram'))) {
     try {
       results.push(await sendTelegramNotify(cfg, message, opts))
     } catch (err) {
       results.push({ ok: false, channel: 'telegram', error: String(err?.message || err).slice(0, 180) })
     }
   }
-  if (ready.wecom) {
+  if (ready.wecom && (!opts.channels || opts.channels.includes('wecom'))) {
     try {
       results.push(await sendWecomNotify(cfg, message, opts))
     } catch (err) {
@@ -849,6 +870,7 @@ export function createNotifyMonitor(opts = {}) {
   let inflight = null
   let timer = null
   const lastSent = new Map()
+  const pendingVmDown = new Map()
   const nowFn = opts.now || (() => Date.now())
 
   const getConfig = () => config
@@ -875,23 +897,46 @@ export function createNotifyMonitor(opts = {}) {
       lastRunAt = started
       let deliveryError = null
       let delivered = false
-      const next = typeof opts.snapshot === 'function' ? await opts.snapshot() : null
+      const poolSnapshot = typeof opts.snapshot === 'function' ? await opts.snapshot() : null
       const prev = snapshot
+      const next = poolSnapshot ? { ...poolSnapshot } : null
+      if (next && opts.vmSnapshot) {
+        const previousVms = new Map((prev?.vms || []).map((vm) => [vm.id, vm]))
+        next.vms = (await opts.vmSnapshot()).map((vm) => {
+          const old = previousVms.get(vm.id)
+          return vm.monitored !== false && vm.online == null && old
+            ? { ...vm, online: old.online, reason: old.reason, detail: old.detail }
+            : vm
+        })
+      }
       snapshot = next
       const events = detectPoolNotifyEvents(prev, next, config)
       if (digest || (config.events.digest && (!prev || allowed('digest', started)))) {
         events.push({ type: 'digest', title: EVENT_TITLES.digest })
       }
+      const currentVms = new Map((next?.vms || []).map((vm) => [vm.id, vm]))
+      for (const [id] of pendingVmDown) {
+        if (!config.events.vm_down || !currentVms.has(id) || currentVms.get(id).online !== false)
+          pendingVmDown.delete(id)
+      }
+      for (const event of events) {
+        if (event.type === 'vm_down') pendingVmDown.set(event.id, { event, channels: null })
+      }
+      const deliveries = [
+        ...events.filter((event) => event.type !== 'vm_down'),
+        ...[...pendingVmDown.values()].map((row) => row.event),
+      ]
       lastEvents = events
       const dispatched = []
       const canSend = send && config.enabled && (typeof opts.send === 'function' || notifyChannelsReady(config).any)
       if (canSend) {
-        for (const event of events) {
-          if (!force && !digest && !allowed(event.type, started)) continue
+        for (const event of deliveries) {
+          if (event.type !== 'vm_down' && !force && !digest && !allowed(event.type, started)) continue
           const message = formatNotifyMessage(event, next, config, opts.baseUrl)
-          const sendFn = opts.send || ((msg) => dispatchNotify(config, msg))
+          const deliveryOptions = { channels: pendingVmDown.get(event.id)?.channels }
+          const sendFn = opts.send || ((msg, _event, extra) => dispatchNotify(config, msg, extra))
           try {
-            const result = await sendFn(message, event)
+            const result = await sendFn(message, event, deliveryOptions)
             lastSent.set(event.type, started)
             const failedChannels = Array.isArray(result?.results)
               ? result.results.filter((row) => row?.ok === false)
@@ -902,10 +947,14 @@ export function createNotifyMonitor(opts = {}) {
                   result?.error ||
                   'notify_delivery_failed',
               ).slice(0, 180)
+              if (event.type === 'vm_down' && failedChannels.length) {
+                pendingVmDown.get(event.id).channels = failedChannels.map((row) => row.channel)
+              }
             } else {
+              if (event.type === 'vm_down') pendingVmDown.delete(event.id)
               delivered = true
             }
-            dispatched.push({ type: event.type, ok: result?.ok !== false, result })
+            dispatched.push({ type: event.type, ok: result?.ok !== false && !failedChannels.length, result })
           } catch (err) {
             deliveryError = String(err?.message || err).slice(0, 180)
             dispatched.push({ type: event.type, ok: false, error: deliveryError })

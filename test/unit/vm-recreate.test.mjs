@@ -157,6 +157,23 @@ test('keep rebuild retains the account, fingerprint and credential file', () => 
   fs.writeFileSync(cred, '{"claudeAiOauth":{"accessToken":"keep"}}')
   fs.writeFileSync(computer, '{"hostname":"kept-host"}')
   fs.writeFileSync(path.join(root, 'vms', id, 'cli-home', '.claude', 'projects'), 'session')
+  const nativeFiles = {
+    'cli-home/.claude.json': '{"userID":"native-user","machineID":"legacy-machine"}',
+    'cli-home/.claude/.claude.json': '{"userID":"nested-user"}',
+    'cli-home/.claude/kin-identity.json': '{"device_id":"kept-native"}',
+    'cli-home/.claude/settings.local.json': '{"permissions":{"allow":["Read"]}}',
+    'cli-home/.claude/telemetry/queue.json': '{"events":[{"id":"retained"}]}',
+    'cli-home/.claude/telemetry/egress.json': '{"epoch":"existing-egress","checked_at":123}',
+  }
+  for (const [rel, content] of Object.entries(nativeFiles)) {
+    const file = path.join(root, 'vms', id, rel)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, content)
+  }
+  fs.writeFileSync(
+    path.join(root, 'vms', id, 'cli-home', '.claude', 'settings.json'),
+    '{"customSetting":"keep","theme":"dark"}',
+  )
   const prev = {
     id,
     name: '11',
@@ -167,6 +184,7 @@ test('keep rebuild retains the account, fingerprint and credential file', () => 
     stats: { calls: 4 },
     schedulable: true,
     created_at: '2026-03-01T00:00:00.000Z',
+    seed_policy: { telemetry_disabled: true, claude_setting: 'KEEP=yes', theme: 'dark' },
   }
   const { vm, mode } = recreateVmFiles(root, prev, { mode: 'keep' })
   assert.equal(mode, 'keep')
@@ -181,6 +199,19 @@ test('keep rebuild retains the account, fingerprint and credential file', () => 
   assert.equal(fs.readFileSync(cred, 'utf8'), '{"claudeAiOauth":{"accessToken":"keep"}}')
   assert.equal(fs.readFileSync(computer, 'utf8'), '{"hostname":"kept-host"}')
   assert.equal(fs.existsSync(path.join(root, 'vms', id, 'cli-home', '.claude', 'projects')), false)
+  assert.equal(vm.seed_policy.telemetry_disabled, true)
+  for (const [rel, content] of Object.entries(nativeFiles)) {
+    assert.equal(fs.readFileSync(path.join(root, 'vms', id, rel), 'utf8'), content, rel)
+  }
+  const settings = JSON.parse(
+    fs.readFileSync(path.join(root, 'vms', id, 'cli-home', '.claude', 'settings.json'), 'utf8'),
+  )
+  assert.equal(settings.customSetting, 'keep')
+  assert.equal(settings.env.DISABLE_TELEMETRY, '1')
+  assert.equal(
+    fs.readFileSync(path.join(root, 'vms', id, 'cli-home', '.claude', 'claude.setting'), 'utf8'),
+    'KEEP=yes\n',
+  )
   fs.rmSync(root, { recursive: true, force: true })
 })
 

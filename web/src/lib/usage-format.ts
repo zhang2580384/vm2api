@@ -31,43 +31,38 @@ export function formatCurrency(
   })}`
 }
 
-/** ≥1000ms 显示 `1.23s`，否则 `850ms`；空值 `-`。 */
+/** ≥1000ms 显示 `1.23s`，否则 `850ms`；空值 / 非有限 / 负数为 `-`。 */
 export function formatDuration(ms: number | null | undefined): string {
-  if (ms == null || !Number.isFinite(ms)) return '-'
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return '-'
   if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`
   return `${Math.round(ms)}ms`
 }
 
 /**
- * 输出速率 tok/s。生成窗口以首 token 为起点（vm2api 没有独立的 TTFB，
- * hub 用 firstByteMs 的位置这里用 TTFT）；任一输入缺失或窗口非正返回 null。
+ * 输出速率 tok/s = 实际输出 tokens / 上游输出窗口。
+ * 窗口是实测 `generationMs`（首个协议事件 → 终止生成事件，含不可见推理），
+ * 缺失、0、负、非有限都不估（不用总耗时减 TTFT / TTFB）。
  */
 export function calculateOutputRate(
   outputTokens: number | null | undefined,
-  durationMs: number | null | undefined,
-  ttftMs: number | null | undefined
+  generationMs: number | null | undefined
 ): number | null {
-  if (outputTokens == null || outputTokens <= 0) return null
-  if (durationMs == null || durationMs <= 0 || ttftMs == null) return null
-  const generationMs = durationMs - ttftMs
-  if (generationMs <= 0) return null
-  return outputTokens / (generationMs / 1000)
-}
-
-/**
- * 被缓冲的流式请求：首 token 几乎贴着总耗时，算出来的速率是假的。
- * 规则同 hub：生成窗口 < 总耗时 10% 且速率 > 5000 tok/s 时隐藏。
- */
-export function shouldHideOutputRate(
-  rate: number | null,
-  durationMs: number | null | undefined,
-  ttftMs: number | null | undefined
-): boolean {
-  if (rate == null || !Number.isFinite(rate)) return false
-  if (durationMs == null || durationMs <= 0 || ttftMs == null) return false
-  const generationMs = durationMs - ttftMs
-  if (generationMs <= 0) return false
-  return generationMs / durationMs < 0.1 && rate > 5000
+  if (
+    outputTokens == null ||
+    !Number.isFinite(outputTokens) ||
+    outputTokens <= 0
+  ) {
+    return null
+  }
+  if (
+    generationMs == null ||
+    !Number.isFinite(generationMs) ||
+    generationMs <= 0
+  ) {
+    return null
+  }
+  const rate = outputTokens / (generationMs / 1000)
+  return Number.isFinite(rate) && rate > 0 ? rate : null
 }
 
 const NON_BILLING_ENDPOINTS: Record<string, true> = {

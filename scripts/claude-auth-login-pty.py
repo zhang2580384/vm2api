@@ -14,18 +14,19 @@ import re
 import select
 import struct
 import termios
+import subprocess
 import time
 from pathlib import Path
 
-URL_RE = re.compile(
-    rb"https://claude\.com/cai/oauth/authorize\?[^\s\x1b\x07\x08\"']+"
-)
+URL_RE = re.compile(rb"https://claude\.com/cai/oauth/authorize\?[^\s\x1b\x07\x08\"']+")
 OSC_URL_RE = re.compile(
     rb"\x1b\]8;[^;]*;(https://claude\.com/cai/oauth/authorize\?[^\x07]+)\x07"
 )
 ANSI_RE = re.compile(rb"\x1b(?:\[[0-9;]*[A-Za-z]|\].*?(?:\x07|\x1b\\))")
 INVALID_RE = re.compile(rb"Invalid code|full code was copied", re.I)
-OAUTH_FAIL_RE = re.compile(rb"OAuth error:\s*([^\r\n\x1b]+)|Login failed:\s*([^\r\n\x1b]+)", re.I)
+OAUTH_FAIL_RE = re.compile(
+    rb"OAuth error:\s*([^\r\n\x1b]+)|Login failed:\s*([^\r\n\x1b]+)", re.I
+)
 RETRY_RE = re.compile(rb"Press Enter to retry", re.I)
 PROMPT_RE = re.compile(rb"Paste code here", re.I)
 SUCCESS_RE = re.compile(rb"Login successful", re.I)
@@ -120,33 +121,61 @@ def build_argv() -> list[str]:
     lang = os.environ.get("LANG", "en_US.UTF-8")
     cli = os.environ["KIN_CLI_BIN"]
     return [
-        "docker", "exec", "-it",
-        "-u", f"{uid}:{gid}",
-        "-e", "HOME=/home/kincli",
-        "-e", "TMPDIR=/home/kincli/.cache/tmp",
-        "-e", "CLAUDE_CONFIG_DIR=/home/kincli/.claude",
-        "-e", f"TZ={tz}",
-        "-e", f"LANG={lang}",
-        "-e", f"LC_ALL={lang}",
-        "-e", "PATH=/home/kincli/.local/bin:/usr/bin:/bin",
-        "-e", "CLAUDE_CODE_HOST_REFRESH=1",
-        "-e", f"CLAUDE_CODE_VERSION={os.environ.get('KIN_CLI_VERSION', '2.1.296')}",
-        "-e", "USER_TYPE=external",
-        "-e", "KIN_AUTH_LOGIN=1",
-        "-e", "CLAUDE_CODE_USE_BEDROCK=0",
-        "-e", "CLAUDE_CODE_USE_VERTEX=0",
-        "-e", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0",
-        "-e", "DISABLE_TELEMETRY=1",
-        "-e", "DO_NOT_TRACK=1",
-        "-e", "ANTHROPIC_BASE_URL=",
-        "-e", "ANTHROPIC_API_KEY=",
-        "-e", "ANTHROPIC_AUTH_TOKEN=",
-        "-e", "CLAUDE_CODE_OAUTH_TOKEN=",
-        "-e", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN=",
-        "-e", "TERM=xterm-256color",
-        "-e", "COLUMNS=220",
-        "-e", "LINES=40",
-        "-w", "/home/kincli",
+        "docker",
+        "exec",
+        "-it",
+        "-u",
+        f"{uid}:{gid}",
+        "-e",
+        "HOME=/home/kincli",
+        "-e",
+        "TMPDIR=/home/kincli/.cache/tmp",
+        "-e",
+        "CLAUDE_CONFIG_DIR=/home/kincli/.claude",
+        "-e",
+        f"TZ={tz}",
+        "-e",
+        f"LANG={lang}",
+        "-e",
+        f"LC_ALL={lang}",
+        "-e",
+        "PATH=/home/kincli/.local/bin:/usr/bin:/bin",
+        "-e",
+        "CLAUDE_CODE_HOST_REFRESH=1",
+        "-e",
+        f"CLAUDE_CODE_VERSION={os.environ.get('KIN_CLI_VERSION', '2.1.296')}",
+        "-e",
+        "USER_TYPE=external",
+        "-e",
+        "KIN_AUTH_LOGIN=1",
+        "-e",
+        "CLAUDE_CODE_USE_BEDROCK=0",
+        "-e",
+        "CLAUDE_CODE_USE_VERTEX=0",
+        "-e",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0",
+        "-e",
+        "DISABLE_TELEMETRY=1",
+        "-e",
+        "DO_NOT_TRACK=1",
+        "-e",
+        "ANTHROPIC_BASE_URL=",
+        "-e",
+        "ANTHROPIC_API_KEY=",
+        "-e",
+        "ANTHROPIC_AUTH_TOKEN=",
+        "-e",
+        "CLAUDE_CODE_OAUTH_TOKEN=",
+        "-e",
+        "CLAUDE_CODE_OAUTH_REFRESH_TOKEN=",
+        "-e",
+        "TERM=xterm-256color",
+        "-e",
+        "COLUMNS=220",
+        "-e",
+        "LINES=40",
+        "-w",
+        "/home/kincli",
         container,
         cli,
         "auth",
@@ -157,7 +186,11 @@ def build_argv() -> list[str]:
 def sanitize_transcript(raw: bytes) -> str:
     text = strip_ansi(raw).decode("utf-8", "replace")
     text = re.sub(r"sk-ant-[a-z0-9]+-[A-Za-z0-9_-]{8,}", "sk-ant-***", text, flags=re.I)
-    text = re.sub(r"https://claude\.com/cai/oauth/authorize\S+", "https://claude.com/cai/oauth/authorize?***", text)
+    text = re.sub(
+        r"https://claude\.com/cai/oauth/authorize\S+",
+        "https://claude.com/cai/oauth/authorize?***",
+        text,
+    )
     text = re.sub(r"(code_challenge|state|code)=[A-Za-z0-9_\-~.]+", r"\1=***", text)
     return text[-4000:]
 
@@ -189,7 +222,9 @@ def feed_inbox(master: int, last_mtime: int | None, ready: bool) -> int | None:
         return last_mtime
     payload = BRACKET_START + text.encode("utf-8", "replace") + BRACKET_END + b"\r"
     if not write_all(master, payload):
-        write_status(status="waiting_auth", error="授权码未能写入官方 CLI 输入框，请重试")
+        write_status(
+            status="waiting_auth", error="授权码未能写入官方 CLI 输入框，请重试"
+        )
         return last_mtime
     try:
         inbox.unlink()
@@ -200,17 +235,26 @@ def feed_inbox(master: int, last_mtime: int | None, ready: bool) -> int | None:
 
 
 def snapshot_credential(before_ns: int) -> bool:
-    src = credential_file()
+    command = os.environ.get("KIN_CREDENTIAL_ARGV", "")
     try:
-        st = src.stat()
-    except OSError:
-        return False
-    if st.st_mtime_ns + 2_000_000_000 < before_ns:
-        return False
-    try:
-        raw = src.read_bytes()
+        if command:
+            argv = json.loads(command)
+            if not isinstance(argv, list) or not argv or argv[0] != "exec":
+                return False
+            result = subprocess.run(
+                ["docker", *argv], capture_output=True, timeout=5, check=False
+            )
+            if result.returncode != 0:
+                return False
+            raw = result.stdout
+        else:
+            src = credential_file()
+            st = src.stat()
+            if st.st_mtime_ns + 2_000_000_000 < before_ns:
+                return False
+            raw = src.read_bytes()
         doc = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError, subprocess.TimeoutExpired):
         return False
     oauth = doc.get("claudeAiOauth") if isinstance(doc, dict) else None
     if not isinstance(oauth, dict):
@@ -300,7 +344,9 @@ def main() -> int:
                     if not url:
                         url = decode_url(buf)
                         if url:
-                            write_status(status="waiting_auth", auth_url=url, error=None)
+                            write_status(
+                                status="waiting_auth", auth_url=url, error=None
+                            )
                             prompt_ready = True
                     if SUCCESS_RE.search(tail):
                         logged_in = True
@@ -313,11 +359,17 @@ def main() -> int:
                         )
                         prompt_ready = True
                     oauth_fail = OAUTH_FAIL_RE.search(tail)
-                    if oauth_fail and not logged_in and oauth_fail.group(0) != last_oauth:
+                    if (
+                        oauth_fail
+                        and not logged_in
+                        and oauth_fail.group(0) != last_oauth
+                    ):
                         last_oauth = oauth_fail.group(0)
-                        detail = (oauth_fail.group(1) or oauth_fail.group(2) or b"").decode(
-                            "utf-8", "replace"
-                        ).strip()[:160]
+                        detail = (
+                            (oauth_fail.group(1) or oauth_fail.group(2) or b"")
+                            .decode("utf-8", "replace")
+                            .strip()[:160]
+                        )
                         write_status(
                             status="waiting_retry",
                             auth_url=url,
@@ -329,10 +381,17 @@ def main() -> int:
                         waiting_fresh_prompt = True
                     if RETRY_RE.search(tail) and not logged_in:
                         prompt_ready = False
-                    if waiting_fresh_prompt and chunk and PROMPT_RE.search(strip_ansi(chunk)) and not logged_in:
+                    if (
+                        waiting_fresh_prompt
+                        and chunk
+                        and PROMPT_RE.search(strip_ansi(chunk))
+                        and not logged_in
+                    ):
                         waiting_fresh_prompt = False
                         prompt_ready = True
-                        write_status(status="waiting_auth", auth_url=url, code_fed=False)
+                        write_status(
+                            status="waiting_auth", auth_url=url, code_fed=False
+                        )
             last_mtime = feed_inbox(master, last_mtime, prompt_ready and not logged_in)
             now = time.time()
             if now - last_beat > 5:
