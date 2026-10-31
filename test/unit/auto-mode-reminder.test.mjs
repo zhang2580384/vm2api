@@ -9,7 +9,7 @@ const SPARSE =
   '<system-reminder>\nAuto mode still active (see full instructions earlier in conversation). Execute autonomously, minimize interruptions, prefer action over planning.\n</system-reminder>'
 const OLD_FULL = `<system-reminder>\n## Auto Mode Active\n\nAuto mode is active. The user chose continuous, autonomous execution. You should:\n\n1. Execute.\n</system-reminder>`
 
-test('a stack of harness reminders becomes one official reminder', () => {
+test('a stack of harness-reported auto mode reminders becomes one official reminder', () => {
   const body = {
     model: 'claude-sonnet-5',
     messages: [
@@ -26,10 +26,10 @@ test('a stack of harness reminders becomes one official reminder', () => {
   assert.deepEqual(again, body)
 })
 
-test('old sparse and full prompts are replaced while official text stays', () => {
+test('old cli-node sparse and full auto mode prompts are replaced, official text is kept', () => {
   assert.equal(repairAutoModeReminderText(SPARSE), CANONICAL)
   assert.equal(repairAutoModeReminderText(OLD_FULL), CANONICAL)
-  const official = `${CANONICAL}\n\nKeep this caller section.`
+  const official = `${CANONICAL}\n\nBefore any command that could discard uncommitted work — keep this extra section.`
   assert.equal(repairAutoModeReminderText(official), official)
   assert.equal(
     repairAutoModeReminderText('<system-reminder>\nPlan mode still active.\n</system-reminder>'),
@@ -37,7 +37,7 @@ test('old sparse and full prompts are replaced while official text stays', () =>
   )
 })
 
-test('assistant echoes of the bad reminder are dropped', () => {
+test('assistant echoes of the bad reminder are dropped and do not break alternation', () => {
   const body = {
     model: 'claude-sonnet-5',
     messages: [
@@ -45,11 +45,17 @@ test('assistant echoes of the bad reminder are dropped', () => {
       { role: 'assistant', content: HARNESS },
       {
         role: 'assistant',
-        content: [{ type: 'text', text: HARNESS }, { type: 'text', text: '先睡。' }],
+        content: [
+          { type: 'text', text: HARNESS },
+          { type: 'text', text: '先睡。' },
+        ],
       },
     ],
   }
   normalizeAnthropicMessages(body)
-  assert.deepEqual(body.messages.map((message) => message.role), ['user', 'assistant'])
+  assert.deepEqual(
+    body.messages.map((message) => message.role),
+    ['user', 'assistant'],
+  )
   assert.deepEqual(body.messages[1].content, [{ type: 'text', text: '先睡。' }])
 })
