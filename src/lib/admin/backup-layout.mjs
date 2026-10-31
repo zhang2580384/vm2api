@@ -57,7 +57,18 @@ export function selected(scope, relative, directory = false) {
         : name.endsWith('.json') && !dataExcluded.has(name)
       : dataFolders.has(parts[0])
   }
-  if (scope === 'config') return !directory && parts.length === 1 && name.endsWith('.json')
+  if (scope === 'config') {
+    if (parts[0] === '.protocol-migrations') {
+      if (parts.length === 1) return directory
+      if (parts[1] !== 'official-303-to-full') return false
+      if (parts.length === 2) return directory
+      if (!/^[a-f0-9]{64}$/.test(parts[2])) return false
+      return parts.length === 3
+        ? directory
+        : parts.length === 4 && !directory && ['routing.json', 'manifest.json'].includes(name)
+    }
+    return !directory && parts.length === 1 && name.endsWith('.json')
+  }
   if (scope === 'vms') {
     const mailbox = parts.indexOf('kin-mailbox')
     if (mailbox !== -1 && parts.length > mailbox + 1 && !['profiles', 'config'].includes(parts[mailbox + 1]))

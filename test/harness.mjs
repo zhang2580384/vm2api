@@ -102,6 +102,8 @@ export async function startGateway(opts = {}) {
     KIN_MOCK_TRACE_FILE: traceFile,
     KIN_MOCK_TEXT: opts.mockText || 'pong',
     KIN_CRS_MOCK: '1',
+    // Tests opt into the scheduler explicitly; a catch-up backup must not race unrelated HTTP assertions.
+    KIN_BACKUP_DISABLED: '1',
   }
   if (opts.env) Object.assign(env, opts.env)
 

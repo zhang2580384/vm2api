@@ -310,9 +310,9 @@ export async function buildUpdateStatus({ projectRoot: root, currentVersion, upg
     upgrade_command: upgradeCommand(updateAvailable ? latest : ''),
     check_command: `sudo bash ${hostRoot(root)}/deploy/install.sh check`,
     repo: GITHUB_REPO,
-    upstream_base: 'v1.4.006',
-    upstream_sync_mode: 'selective',
-    protocol_base: 'v1.3.226',
+    upstream_base: 'v1.4.030',
+    upstream_sync_mode: 'integration-candidate',
+    protocol_base: 'v1.4.030',
     source_error: remote.error,
     ...(upgrade ? { upgrade } : {}),
   }

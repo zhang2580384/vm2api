@@ -326,7 +326,7 @@ test('bucket panel seals secrets, restricts access and restores after the local 
 
 test('automatic scheduled backup runs at boot catch-up (default enabled)', async () => {
   // default schedule is enabled; boot catch-up timer fires ~5s after start
-  const gw = await startGateway({})
+  const gw = await startGateway({ env: { KIN_BACKUP_DISABLED: '0' } })
   try {
     let items = []
     const deadline = Date.now() + 15_000

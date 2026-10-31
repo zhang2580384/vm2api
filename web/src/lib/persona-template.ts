@@ -972,14 +972,20 @@ function withStandingSlot(
     const id = String(block?.id || '')
     const text = String(block?.text || '')
     return (
-      id === 'harness' ||
-      id === 'guidance' ||
-      text.includes('{{harness_303}}') ||
+      /agent/i.test(id) ||
+      text.includes('{{caller_agent}}') ||
       text.includes('{{agent_official}}')
     )
   })
   const copy = blocks.map((block) => ({ ...block }))
-  if (idx < 0) return [...blocks]
+  if (idx < 0) {
+    copy.splice(Math.min(copy.length, 2), 0, {
+      id: 'agent_standing',
+      type: 'text',
+      text: '{{agent_standing}}',
+    })
+    return copy
+  }
   const existing = String(copy[idx].text || '')
   copy[idx].text = existing.replace(/\u200b/g, '').trim()
     ? `{{agent_standing}}${existing}`

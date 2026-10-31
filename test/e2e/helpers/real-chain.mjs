@@ -197,7 +197,7 @@ export async function startRealChain({
       claude: { mode: 'api-key' },
       runtime: { kernel_socket: socketPath, worker_token_file: tokenPath, worker_run_dir: temp },
     }
-    const exec = { vmId: vm.id, vm, homeDir, oauth: {}, timezone: 'UTC' }
+    const exec = { vmId: vm.id, vm, homeDir, oauth: {}, timezone }
     const routingPath = path.join(temp, 'routing.json')
     const buildRouting = () => {
       if (!routingBase) {

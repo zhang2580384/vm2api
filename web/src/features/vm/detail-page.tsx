@@ -61,7 +61,6 @@ import { StatusMark } from '@/components/status-mark'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { proxiesForVmBind } from '@/features/proxies/proxy-sort'
 import { proxiesQueryOptions } from '@/features/proxies/queries'
-import { routingQueryOptions } from '@/features/settings/queries'
 import {
   planDeleteActiveVm,
   type DeleteActiveVmPlan,
