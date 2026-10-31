@@ -35,7 +35,9 @@ function verifyPayload(root) {
 function writableSource(original, destination) {
   // Both source mounts stay read-only. Startup writes a public configuration
   // snapshot beside src, so use private tmp copies for the exact source trees.
-  fs.cpSync(path.join(original, 'src'), path.join(destination, 'src'), { recursive: true })
+  for (const directory of ['src', 'scripts', 'deploy', 'docker']) {
+    fs.cpSync(path.join(original, directory), path.join(destination, directory), { recursive: true })
+  }
   for (const file of ['VERSION', 'package.json'])
     fs.copyFileSync(path.join(original, file), path.join(destination, file))
   fs.symlinkSync(path.join(original, 'node_modules'), path.join(destination, 'node_modules'), 'junction')
