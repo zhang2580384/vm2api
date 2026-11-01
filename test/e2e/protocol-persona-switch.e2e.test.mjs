@@ -42,7 +42,12 @@ for (const family of ['direct', 'relayed']) {
             detect_proxied_official_cc: true,
             ...(setting === undefined ? {} : { official_cc_passthrough: setting }),
             persona_env_presets: { custom: false },
-            persona_templates: { custom: [{ type: 'text', text: selected }] },
+            persona_templates: {
+              custom: [
+                { type: 'text', text: selected },
+                { id: 'caller_system', type: 'text', text: '{{caller_system}}', drop_if_empty: true },
+              ],
+            },
           },
         },
       })
@@ -82,6 +87,56 @@ for (const family of ['direct', 'relayed']) {
       }
     })
   }
+}
+
+for (const family of ['direct', 'relayed']) {
+  test(`native ${family}: a literal-only custom template deliberately replaces the caller system`, {
+    skip: !enabled,
+    timeout: 60000,
+  }, async () => {
+    const chain = await startRealChain({
+      kernelBin,
+      cliBin,
+      preset: 'custom',
+      routingBase: {
+        compatibility: {
+          detect_proxied_official_cc: true,
+          official_cc_passthrough: false,
+          persona_templates: { custom: [{ type: 'text', text: selected }] },
+        },
+      },
+    })
+    try {
+      const result = await chain.send({
+        request: {
+          path: '/v1/messages',
+          headers: family === 'direct' ? { 'user-agent': 'claude-cli/2.1.303 (external, cli)' } : {},
+          body: {
+            model: 'claude-haiku-5-5',
+            stream: true,
+            max_tokens: 256,
+            metadata: { user_id: JSON.stringify({ device_id: 'd'.repeat(64), session_id: randomUUID() }) },
+            system: [
+              { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.303.abc; cc_entrypoint=cli;' },
+              { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
+              { type: 'text', text: caller },
+            ],
+            messages: [{ role: 'user', content: 'FICTIONAL_USER_REQUEST' }],
+          },
+        },
+      })
+      evidence.push({ family, template: 'literal-only', result, node_body: chain.logs.at(-1)?.outbound_body })
+      assert.equal(result.status, 200, result.response)
+      assert.equal(result.count, 1)
+      for (const serialized of [JSON.stringify(chain.logs.at(-1)?.outbound_body), JSON.stringify(result.body)]) {
+        assert.equal(serialized.includes(selected), true)
+        assert.equal(serialized.includes(caller), false, 'No caller placeholder was configured')
+        assert.equal(serialized.split('FICTIONAL_USER_REQUEST').length - 1, 1)
+      }
+    } finally {
+      await chain.close()
+    }
+  })
 }
 
 for (const preset of ['zero', 'official', 'official_full']) {
