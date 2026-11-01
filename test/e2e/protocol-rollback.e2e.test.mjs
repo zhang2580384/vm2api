@@ -50,7 +50,15 @@ test('v2.4.4 source, database, configuration and pinned payload remain usable af
 }, async (t) => {
   assert.equal(fs.readFileSync(path.join(previous, 'VERSION'), 'utf8').trim(), '2.4.4')
   assert.equal(verifyPayload(previous), 'payload-2026.10.24-cli-303-sdk')
-  assert.equal(verifyPayload(REPO_ROOT), 'payload-2026.10.29-telemetry-kernel')
+  assert.equal(verifyPayload(REPO_ROOT), 'payload-2026.11.01-codex-image-kernel')
+  // The candidate upgrades the Codex image kernel; the previous payload remains exact.
+  assert.equal(
+    crypto
+      .createHash('sha256')
+      .update(fs.readFileSync(path.join(REPO_ROOT, 'bin/kin-codex-kernel')))
+      .digest('hex'),
+    'afdb433ebf3c719eb8596e09ca6493e8f769af1aab136426e82cbcd54c9bdc4a',
+  )
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fictional-protocol-rollback-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const oldSource = writableSource(previous, path.join(root, 'old-source'))

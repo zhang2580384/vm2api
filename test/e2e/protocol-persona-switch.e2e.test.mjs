@@ -190,3 +190,67 @@ for (const preset of ['zero', 'official', 'official_full']) {
     }
   })
 }
+
+for (const protocol of ['/v1/messages', '/v1/chat/completions']) {
+  test(`native custom ${protocol}: disabled environment stays absent without caller environment`, {
+    skip: !enabled,
+    timeout: 90000,
+  }, async () => {
+    const generatedTimezone = 'Pacific/Honolulu'
+    const chain = await startRealChain({
+      kernelBin,
+      cliBin,
+      preset: 'custom',
+      timezone: generatedTimezone,
+      routingBase: {
+        compatibility: {
+          persona_env_presets: { custom: false },
+          persona_timezone_presets: { custom: false },
+          persona_env_instructions_presets: { custom: false },
+          persona_templates: {
+            custom: [
+              { type: 'text', text: selected },
+              { id: 'caller_system', type: 'text', text: '{{caller_system}}', drop_if_empty: true },
+            ],
+          },
+        },
+      },
+    })
+    const unexpectedEnvironment = []
+    try {
+      for (const withCaller of [false, true]) {
+        const messages = [{ role: 'user', content: 'FICTIONAL_CUSTOM_ENV_USER' }]
+        const result = await chain.send({
+          request: {
+            path: protocol,
+            body: {
+              model: 'claude-haiku-5-5',
+              max_tokens: 256,
+              stream: true,
+              metadata: { user_id: JSON.stringify({ device_id: 'fixture-device', session_id: randomUUID() }) },
+              ...(protocol === '/v1/messages'
+                ? { ...(withCaller ? { system: caller } : {}), messages }
+                : { messages: [...(withCaller ? [{ role: 'system', content: caller }] : []), ...messages] }),
+            },
+          },
+        })
+        const nodeBody = chain.logs.at(-1)?.outbound_body
+        evidence.push({ preset: 'custom', protocol, withCaller, environment: 'disabled', result, node_body: nodeBody })
+        assert.equal(result.status, 200, result.response)
+        assert.equal(result.count, 1)
+        for (const [boundary, body] of [
+          ['node', nodeBody],
+          ['native', result.body],
+        ]) {
+          const serialized = JSON.stringify(body)
+          assert.equal(serialized.split(caller).length - 1, Number(withCaller))
+          assert.equal(serialized.split(selected).length - 1, 1)
+          if (serialized.includes(generatedTimezone)) unexpectedEnvironment.push({ boundary, withCaller })
+        }
+      }
+      assert.deepEqual(unexpectedEnvironment, [], 'Disabled generated timezone must stay absent after the native CLI')
+    } finally {
+      await chain.close()
+    }
+  })
+}
