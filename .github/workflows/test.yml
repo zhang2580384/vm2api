@@ -147,7 +147,7 @@ jobs:
             -e KIN_303_CLI=/candidate/share/wrap-cli/cli-node \
             -e KIN_PROTOCOL_EVIDENCE_DIR=/evidence \
             --entrypoint node node:22-bookworm-slim \
-            --test --test-reporter=tap test/e2e/protocol-native-matrix.e2e.test.mjs test/e2e/protocol-persona-switch.e2e.test.mjs test/e2e/protocol-rollback.e2e.test.mjs
+            --test --test-reporter=tap test/e2e/protocol-native-matrix.e2e.test.mjs test/e2e/protocol-persona-switch.e2e.test.mjs test/e2e/protocol-cache-prefix.e2e.test.mjs test/e2e/protocol-rollback.e2e.test.mjs
       - uses: actions/upload-artifact@v6
         if: always()
         with:
