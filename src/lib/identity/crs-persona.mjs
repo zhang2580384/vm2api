@@ -439,10 +439,17 @@ export function ccEntrypointFromRouting(routing) {
   return routing?.compatibility?.cc_entrypoint === 'sdk-cli' ? 'sdk-cli' : 'cli'
 }
 
-/** Add the billing block exactly once before the cli-node hop. */
+/** Add the project billing block when none is present. Do not replace one the template already wrote. */
 export function ensureBillingAttribution(
   body,
-  { firstUserText = '', cliVersion = DEFAULT_CLI_VERSION, sessionId = '', indexes = null, entrypoint = 'cli' } = {},
+  {
+    firstUserText = '',
+    cliVersion = DEFAULT_CLI_VERSION,
+    sessionId = '',
+    indexes = null,
+    entrypoint = 'cli',
+    passthrough = false,
+  } = {},
 ) {
   if (!body || typeof body !== 'object') return body
   const hasBilling = (system) => {
@@ -450,7 +457,7 @@ export function ensureBillingAttribution(
     if (!Array.isArray(system)) return false
     return system.some((block) => /x-anthropic-billing-header:/i.test(String(block?.text || block || '')))
   }
-  if (hasBilling(body.system)) return body
+  if (passthrough || hasBilling(body.system)) return body
   const block = {
     type: 'text',
     text: buildBillingAttributionText(firstUserText, cliVersion, sessionId, indexes, entrypoint),
@@ -2194,9 +2201,10 @@ export function applyCrsUnofficialPersona(
   } = {},
 ) {
   if (!body || typeof body !== 'object') return body
-  // Looking like Claude Code is not enough. The handler sets officialClient
-  // only when routing.compatibility.official_cc_passthrough is on.
-  if (!forceConfigured && officialClient) return body
+  // Recognized official Claude Code keeps its inbound system and cache markers.
+  // #843 forced this through persona and left ttl-less caller markers, which
+  // Anthropic bills as implicit 5m. forceConfigured still rewrites on purpose.
+  if (!forceConfigured && (officialClient || isOfficialClaudeCodeTraffic(headers || {}, body))) return body
   const fromFile = routingFile ? personaOptionsFromRoutingFile(routingFile) : null
   const resolved = normalizePersonaMode(mode ?? fromFile?.mode)
   // Read the caller's agent prompt before stripLeakySystem drops it as known official text.
