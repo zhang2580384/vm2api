@@ -29,7 +29,7 @@ const history = () =>
   }))
 function callerBlocks(body) {
   return (body?.messages || []).flatMap((message) =>
-    (message.content || [])
+    (typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content || [])
       .filter((block) => block.type === 'text' && /FICTIONAL_HISTORY_\d/.test(block.text))
       .map((block) => ({ role: message.role, ...block })),
   )
@@ -136,6 +136,7 @@ for (const [menu, caller, expected] of [
             model: 'claude-haiku-5-5',
             max_tokens: 256,
             stream: true,
+            metadata: { user_id: JSON.stringify({ device_id: 'd'.repeat(64), session_id: randomUUID() }) },
             system: "You are Claude Code, Anthropic's official CLI for Claude.",
             messages: [
               {

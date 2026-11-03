@@ -14,6 +14,7 @@ import { createRespond, readBody } from '../../../src/lib/http/respond.mjs'
 import { rememberRustHealth, clearRustHealthCache } from '../../../src/lib/transport/kernel-router.mjs'
 import { profileForPreset } from '../../../src/lib/identity/official-profiles.mjs'
 import { ccEntrypointFromRouting } from '../../../src/lib/identity/crs-persona.mjs'
+import { FailoverRunner } from '../../../src/lib/pool/failover-runner.mjs'
 
 const PROTOCOL_BY_PATH = {
   '/v1/messages': 'anthropic.messages',
@@ -266,20 +267,17 @@ export async function startRealChain({
       apiKeyStore: {},
       accountQuota: {},
       stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
-      failoverRunner: {
-        async run(opts) {
-          const candidate = { vmId: vm.id, accountId: 'fixture-account', vm, exec }
-          const prepared = await opts.applyAttempt(opts.canonicalBody, candidate)
-          return opts.callAttempt({
-            candidate,
-            body: prepared.body,
-            attemptMeta: prepared.meta,
-            signal: opts.signal,
-            deliveryMode: opts.deliveryMode,
-            onCommit() {},
-          })
+      failoverRunner: new FailoverRunner({
+        scheduler: {
+          async selectAndReserve() {
+            return { ok: true, vmId: vm.id, accountId: 'fixture-account', vm, exec, release() {} }
+          },
+          markSuccess() {},
+          markCooldown() {},
+          releaseAccountSessions() {},
         },
-      },
+        config: { max_same_account_retries: 0 },
+      }),
     })
     // send() is serialized, so the gateway reads the in-flight protocol from here.
     let protocolNow = 'anthropic.messages'
