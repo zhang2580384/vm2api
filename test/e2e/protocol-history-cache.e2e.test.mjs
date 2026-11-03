@@ -45,7 +45,15 @@ for (const preset of ['zero', 'official', 'official_full', 'custom']) {
     skip: !enabled,
     timeout: 180000,
   }, async () => {
-    const chain = await startRealChain({ kernelBin, cliBin, preset, cacheTtl: '1h' })
+    // Match the old history-edit contract's explicit passthrough session mode.
+    // This fixture has no persistent sticky router to bind rebuild-mode IDs.
+    const chain = await startRealChain({
+      kernelBin,
+      cliBin,
+      preset,
+      cacheTtl: '1h',
+      routingBase: { sticky: { outbound_session: 'passthrough' } },
+    })
     const rows = []
     try {
       for (const ttl of [undefined, '5m']) {
@@ -62,9 +70,10 @@ for (const preset of ['zero', 'official', 'official_full', 'custom']) {
             },
           })
           const node = chain.logs.at(-1)?.outbound_body
-          rows.push({ kind: 'caller', ttl, edit, node, result })
+          rows.push({ kind: 'caller', ttl, edit, node, prefix: chain.logs.at(-1)?.cache_prefix, result })
           assert.equal(result.status, 200, result.response)
           assert.equal(result.count, 1)
+          assert.equal(chain.logs.at(-1)?.cache_prefix?.turn, edit ? 2 : 1)
           for (const [boundary, body] of [
             ['node', node],
             ['native', result.body],
@@ -95,8 +104,9 @@ for (const preset of ['zero', 'official', 'official_full', 'custom']) {
           },
         })
         const node = chain.logs.at(-1)?.outbound_body
-        rows.push({ kind: 'generated', edit, node, result })
+        rows.push({ kind: 'generated', edit, node, prefix: chain.logs.at(-1)?.cache_prefix, result })
         assert.equal(result.status, 200, result.response)
+        assert.equal(chain.logs.at(-1)?.cache_prefix?.turn, edit ? 2 : 1)
         for (const body of [node, result.body]) {
           assert.deepEqual(
             anchors(body),
