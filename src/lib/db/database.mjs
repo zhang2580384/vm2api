@@ -17,6 +17,8 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { initializeCredentialSecret } from './secure.mjs'
+import { startSqlitePool, stopSqlitePool } from './sqlite-pool.mjs'
+import { armWriteBehind, flushWrites } from './write-behind.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const MIGRATIONS_DIR = path.join(__dirname, 'migrations')
@@ -104,6 +106,7 @@ function reconcileHistorical001ProxySchema(db, checksum) {
 }
 let _db = null
 let _dbPath = null
+let poolWanted = false
 
 export function resolveDbPath({ dataDir, dbPath } = {}) {
   if (dbPath) return dbPath
@@ -136,8 +139,15 @@ export function createDatabase({ dataDir, dbPath, migrationsDir } = {}) {
  * Open (or return the already-open) singleton database.
  * @returns {DatabaseSync}
  */
-export function openDatabase({ dataDir, dbPath, migrationsDir, allowRestore = false } = {}) {
-  if (_db) return _db
+export function openDatabase({ dataDir, dbPath, migrationsDir, allowRestore = false, pooled = false } = {}) {
+  if (pooled) poolWanted = true
+  if (_db) {
+    if (poolWanted) {
+      startSqlitePool(_dbPath)
+      armWriteBehind(_db)
+    }
+    return _db
+  }
   if (
     !allowRestore &&
     fs.existsSync(path.join(dataDir || path.dirname(resolveDbPath({ dbPath })), 'backup-restore-pending.json'))
@@ -148,6 +158,10 @@ export function openDatabase({ dataDir, dbPath, migrationsDir, allowRestore = fa
   initializeCredentialSecret(dataDir || path.dirname(resolveDbPath({ dbPath })))
   _db = createDatabase({ dataDir, dbPath, migrationsDir })
   _dbPath = resolveDbPath({ dataDir, dbPath })
+  if (poolWanted) {
+    startSqlitePool(_dbPath)
+    armWriteBehind(_db)
+  }
   return _db
 }
 
@@ -176,6 +190,9 @@ export function getDbPath() {
 }
 
 export function closeDatabase() {
+  flushWrites()
+  armWriteBehind(null)
+  stopSqlitePool()
   if (_db) {
     try {
       _db.close()
