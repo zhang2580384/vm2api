@@ -158,3 +158,56 @@ for (const [menu, caller, expected] of [
     }
   })
 }
+
+for (const inline of [false, true]) {
+  test(`native inline tool_definition=${inline} controls the request beta`, {
+    skip: !enabled,
+    timeout: 60000,
+  }, async () => {
+    const chain = await startRealChain({ kernelBin, cliBin, preset: 'zero' })
+    let result
+    try {
+      const messages = [{ role: 'user', content: 'FICTIONAL_INLINE_USER' }]
+      if (inline)
+        messages.push(
+          {
+            role: 'system',
+            content: [
+              {
+                type: 'tool_addition',
+                tool: {
+                  type: 'tool_definition',
+                  name: 'fixture_inline',
+                  description: 'Fictional offline tool',
+                  input_schema: { type: 'object' },
+                },
+              },
+            ],
+          },
+          { role: 'user', content: 'FICTIONAL_INLINE_CONTINUE' },
+        )
+      result = await chain.send({
+        request: {
+          body: {
+            model: 'claude-haiku-5-5',
+            max_tokens: 256,
+            stream: true,
+            messages,
+          },
+        },
+      })
+      assert.equal(result.status, 200, result.response)
+      assert.equal(result.count, 1)
+      const betas = String(result.headers['anthropic-beta'] || '').split(',')
+      assert.equal(betas.includes('inline-tools-2026-09-15'), inline)
+      const additions = (result.body.messages || [])
+        .flatMap((message) => message.content || [])
+        .filter((block) => block.type === 'tool_addition')
+      assert.equal(additions.length, inline ? 1 : 0)
+      if (inline) assert.equal(additions[0].tool.type, 'tool_definition')
+    } finally {
+      evidence.push({ inline, node: chain.logs.at(-1)?.outbound_body, result })
+      await chain.close()
+    }
+  })
+}
