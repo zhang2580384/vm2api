@@ -45,48 +45,53 @@ for (const preset of ['zero', 'official', 'official_full', 'custom']) {
     })
     const rows = []
     try {
-      for (const menu of ['5m', '1h']) {
+      for (const { menu, prefixTtl, ttl, expected } of [
+        { menu: '5m', prefixTtl: undefined, ttl: undefined, expected: '5m' },
+        { menu: '1h', prefixTtl: undefined, ttl: undefined, expected: '1h' },
+        { menu: '5m', prefixTtl: '1h', ttl: undefined, expected: '1h' },
+        { menu: '1h', prefixTtl: '1h', ttl: '5m', expected: '5m' },
+        { menu: '5m', prefixTtl: '1h', ttl: '5m', expected: '5m' },
+        { menu: '5m', prefixTtl: '1h', ttl: '1h', expected: '1h' },
+      ]) {
         chain.setCacheTtl(menu)
-        for (const ttl of [undefined, '5m', '1h']) {
-          const messages = Array.from({ length: 9 }, (_, i) => ({
-            role: i % 2 ? 'assistant' : 'user',
-            content: [{ type: 'text', text: `FICTIONAL_V038_HISTORY_${i}` }],
-          }))
-          messages[2].content[0].cache_control = { type: 'ephemeral', ttl: '1h' }
-          messages[8].content[0].cache_control = { type: 'ephemeral', ...(ttl ? { ttl } : {}) }
-          const session = randomUUID()
-          for (const edit of [false, true]) {
-            if (edit) messages[6].content[0].text = 'FICTIONAL_V038_HISTORY_6_EDITED'
-            const result = await chain.send({
-              request: {
-                headers: { 'x-session-id': session },
-                body: { model: 'claude-opus-5-5', max_tokens: 256, stream: true, messages },
-              },
-            })
-            const node = chain.logs.at(-1)?.outbound_body
-            const prefix = chain.logs.at(-1)?.cache_prefix
-            rows.push({ menu, ttl, edit, node, prefix, result })
-            assert.equal(result.status, 200, result.response)
-            assert.equal(result.count, 1)
-            assert.equal(prefix?.turn, edit ? 2 : 1)
-            for (const [boundary, body] of [
-              ['node', node],
-              ['native', result.body],
-            ]) {
-              const actual = callerBlocks(body)
-              assert.deepEqual(
-                actual.map(({ role, text }) => ({ role, text })),
-                messages.map((message) => ({ role: message.role, text: message.content[0].text })),
-                boundary,
-              )
-              assert.deepEqual(
-                actual.filter((block) => block.cache_control).map((block) => block.text),
-                ['FICTIONAL_V038_HISTORY_2', 'FICTIONAL_V038_HISTORY_8'],
-                boundary,
-              )
-              assert.equal(actual[2].cache_control.ttl, '1h', boundary)
-              assert.equal(actual[8].cache_control.ttl, ttl || menu, boundary)
-            }
+        const messages = Array.from({ length: 9 }, (_, i) => ({
+          role: i % 2 ? 'assistant' : 'user',
+          content: [{ type: 'text', text: `FICTIONAL_V038_HISTORY_${i}` }],
+        }))
+        messages[2].content[0].cache_control = { type: 'ephemeral', ttl: prefixTtl }
+        messages[8].content[0].cache_control = { type: 'ephemeral', ...(ttl ? { ttl } : {}) }
+        const session = randomUUID()
+        for (const edit of [false, true]) {
+          if (edit) messages[6].content[0].text = 'FICTIONAL_V038_HISTORY_6_EDITED'
+          const result = await chain.send({
+            request: {
+              headers: { 'x-session-id': session },
+              body: { model: 'claude-opus-5-5', max_tokens: 256, stream: true, messages },
+            },
+          })
+          const node = chain.logs.at(-1)?.outbound_body
+          const prefix = chain.logs.at(-1)?.cache_prefix
+          rows.push({ menu, prefixTtl, ttl, expected, edit, node, prefix, result })
+          assert.equal(result.status, 200, result.response)
+          assert.equal(result.count, 1)
+          assert.equal(prefix?.turn, edit ? 2 : 1)
+          for (const [boundary, body] of [
+            ['node', node],
+            ['native', result.body],
+          ]) {
+            const actual = callerBlocks(body)
+            assert.deepEqual(
+              actual.map(({ role, text }) => ({ role, text })),
+              messages.map((message) => ({ role: message.role, text: message.content[0].text })),
+              boundary,
+            )
+            assert.deepEqual(
+              actual.filter((block) => block.cache_control).map((block) => block.text),
+              ['FICTIONAL_V038_HISTORY_2', 'FICTIONAL_V038_HISTORY_8'],
+              boundary,
+            )
+            assert.equal(actual[2].cache_control.ttl, prefixTtl || expected, boundary)
+            assert.equal(actual[8].cache_control.ttl, expected, boundary)
           }
         }
       }
