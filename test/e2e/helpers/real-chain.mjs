@@ -15,6 +15,7 @@ import { rememberRustHealth, clearRustHealthCache } from '../../../src/lib/trans
 import { profileForPreset } from '../../../src/lib/identity/official-profiles.mjs'
 import { ccEntrypointFromRouting } from '../../../src/lib/identity/crs-persona.mjs'
 import { FailoverRunner } from '../../../src/lib/pool/failover-runner.mjs'
+import { thinkingDisplayMode } from '../../../src/lib/protocol/thinking.mjs'
 
 const PROTOCOL_BY_PATH = {
   '/v1/messages': 'anthropic.messages',
@@ -127,6 +128,7 @@ export async function startRealChain({
     const configPath = path.join(temp, 'kernel.json')
     let presetNow = preset
     let ttlNow = cacheTtl
+    let thinkingDisplayNow = thinkingDisplayMode(routingBase)
     const kernelConfig = () => ({
       vm_id: 'vm-01',
       socket_path: socketPath,
@@ -140,6 +142,7 @@ export async function startRealChain({
       // Same projection as writeKernelConfig: cli-node hot-reads this for UA and billing.
       cli_version: profileForPreset(presetNow).cliVersion,
       default_cache_ttl: ttlNow,
+      thinking_display: thinkingDisplayNow,
       cc_entrypoint: ccEntrypointFromRouting(
         routingBase || { compatibility: { persona_preset: presetNow, cache_ttl: ttlNow } },
       ),
@@ -209,7 +212,7 @@ export async function startRealChain({
             cache_ttl: ttlNow,
             min_max_tokens: 128,
             detect_proxied_official_cc: true,
-            thinking_display: 'omitted',
+            thinking_display: thinkingDisplayNow,
             overlay_preset: 'off',
           },
           failover: { stream_keepalive_ms: 0 },
@@ -220,6 +223,7 @@ export async function startRealChain({
         ...routing.compatibility,
         persona_preset: presetNow,
         cache_ttl: ttlNow,
+        thinking_display: thinkingDisplayNow,
         overlay_preset: 'off',
       }
       routing.inference = { health_ttl_ms: 60000, ...routing.inference, engine: 'rust' }
@@ -254,7 +258,12 @@ export async function startRealChain({
       ...createRespond(cfg),
       readBody,
       cfg,
-      requireAuth: () => true,
+      requireAuth: (req) => {
+        // The local fixture bypasses authentication, but must supply the same
+        // presented-key field consumed by the real handler's prune-cache scope.
+        req.presentedApiKey = req.headers['x-api-key'] || 'fictional-real-chain-key'
+        return true
+      },
       requestLog: {
         start: () => ({ request_id: 'req_303_gateway', mode: 'debug', capture_outbound: true }),
         finish: (_ctx, bag) => logs.push(bag),
@@ -332,6 +341,10 @@ export async function startRealChain({
       },
       setCacheTtl(next) {
         ttlNow = next
+        writeSettings()
+      },
+      setThinkingDisplay(next) {
+        thinkingDisplayNow = thinkingDisplayMode({ compatibility: { thinking_display: next } })
         writeSettings()
       },
       health: () => unixRequest(socketPath, token, '/internal/health'),
