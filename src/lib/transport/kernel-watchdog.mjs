@@ -26,6 +26,9 @@ import { resolveInferenceEngine } from '../vm/slot-engine.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
 import { dockerRequest } from '../cluster/docker-remote.mjs'
 import { clusterManager, vmNodeId } from '../cluster/placement.mjs'
+import { vmTimeoutTracker } from '../pool/failover-runner.mjs'
+import path from 'node:path'
+import { checkCragLicense } from '../vm/crag-license.mjs'
 
 /** A failed observation is not evidence of a dead container. Use the slot's own host, including KVM runners. */
 export async function observeWatchdogContainer(
@@ -98,6 +101,7 @@ const HARD_DOWN = new Set(['stopped', 'dead', 'error', 'disabled'])
 
 export function isKernelWatchdogTarget(vm, routing = {}) {
   if (!vm?.id) return false
+  if (vm.migration_pending || ['running', 'needs_attention'].includes(vm.slot_migration?.status)) return false
   if (HARD_DOWN.has(String(vm.status || '').toLowerCase())) return false
   // Effective engine, not the slot's own fields: panel-created slots omit
   // inference_engine and inherit routing.inference.engine (usually rust).
@@ -229,6 +233,9 @@ export function createKernelWatchdog({
   }
 
   async function checkVm(vm, routing) {
+    const home = typeof homeDirFor === 'function' ? homeDirFor(vm) : null
+    const licensed = checkCragLicense(home ? path.resolve(home, '../../..') : '', vm, routing)
+    if (!licensed.ok) return // Activation, not container recovery, repairs licensing failures.
     const probed = probeVm(vm)
     if (!probed) {
       // The kernel cannot be probed without its relay; only a container that is really down is revived.
@@ -255,7 +262,10 @@ export function createKernelWatchdog({
     if (!rustKernelNeedsRestart(current)) {
       // Healthy again after a fault means someone fixed it: start a fresh budget.
       // Plain recovery keeps past attempts so a crash loop stays bounded by the window.
-      if (kernelFaults.delete(vm.id)) restarts.delete(vm.id)
+      if (kernelFaults.delete(vm.id)) {
+        restarts.delete(vm.id)
+        vmTimeoutTracker?.reset?.(vm.id)
+      }
       // Config convergence, not a failure: outside the restart budget.
       if (kernelSlotMismatch(exec)) {
         const observed = await observeRuntime(vm)
@@ -366,6 +376,7 @@ export function createKernelWatchdog({
     reset(vmId) {
       const faulted = kernelFaults.delete(vmId)
       restarts.delete(vmId)
+      vmTimeoutTracker?.reset?.(vmId)
       return { faulted }
     },
     restartsInWindow(vmId) {

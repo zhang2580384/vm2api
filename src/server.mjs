@@ -104,6 +104,7 @@ import { stopAllRustKernels } from './lib/transport/rust-kernel-supervisor.mjs'
 import { createRespond, parseRequestUrl } from './lib/http/respond.mjs'
 import { corsHeadersForRequest } from './lib/http/cors.mjs'
 import { isConsoleEntry, tryServeWebDist } from './lib/http/web-dist.mjs'
+import { createGracefulShutdown } from './lib/http/graceful-shutdown.mjs'
 import { createRoutingRuntime } from './lib/admin/routing-runtime.mjs'
 import { createImportCommit } from './lib/oauth/import-commit.mjs'
 import { createHandleProtocol } from './lib/protocol/handle-protocol.mjs'
@@ -1115,6 +1116,58 @@ backupService.onAfterRestore(() => restoreRuntime.after())
 backupService.onBeforeSnapshot(() => codexMailboxService(cfg.paths.project).beginSnapshot())
 backupService.onAfterSnapshot(() => codexMailboxService(cfg.paths.project).endSnapshot())
 
+const gracefulShutdown = createGracefulShutdown({
+  beforeDrain: async () => {
+    installJevUsageRecorder(null)
+    try {
+      vmTestSchedule.stop()
+      qualityRunner.stop()
+    } catch {}
+    try {
+      backupService.stopScheduler()
+    } catch {}
+    try {
+      proxyPool.stopScheduler()
+    } catch {}
+    try {
+      healthMonitor?.stop?.()
+    } catch {}
+    try {
+      credentialRefreshMonitor?.stop?.()
+      codexMailboxService(cfg.paths.project).stop()
+    } catch {}
+    try {
+      kernelWatchdog?.stop?.()
+    } catch {}
+    try {
+      cliNodeGuard?.stop?.()
+    } catch {}
+    try {
+      usageProbeMonitor?.stop?.()
+    } catch {}
+    try {
+      catalogMonitor?.stop?.()
+    } catch {}
+    try {
+      notifyMonitor?.stop?.()
+    } catch {}
+  },
+  afterDrain: async () => {
+    try {
+      stopVmWatch()
+    } catch {}
+    try {
+      stopAllRustKernels()
+    } catch {}
+    try {
+      await clusterManager.stop()
+    } catch {}
+    try {
+      closeDatabase()
+    } catch {}
+  },
+})
+
 const server = http.createServer(async (req, res) => {
   const requestDone = restoreRuntime.trackHttp(req, res)
   try {
@@ -1129,6 +1182,20 @@ const server = http.createServer(async (req, res) => {
       return json(res, 400, { error: { message: 'Invalid URL', type: 'invalid_request' } })
     }
     const p = url.pathname
+    if (gracefulShutdown.isShuttingDown()) {
+      res.setHeader('Connection', 'close')
+      if (p === '/health' || p === '/healthz') {
+        return json(res, 503, { status: 'shutting_down' })
+      }
+      return json(res, 503, {
+        error: {
+          type: 'overloaded_error',
+          code: 'server_shutting_down',
+          message: 'Gateway is shutting down; retry shortly',
+        },
+      })
+    }
+    gracefulShutdown.trackRequest(req, res)
 
     if (isTelemetryPath(p)) {
       return json(res, 200, telemetryInterceptResponse(p))
@@ -1295,8 +1362,11 @@ const server = http.createServer(async (req, res) => {
     requestDone()
   }
 })
-
 server.on('upgrade', (req, socket, head) => {
+  if (gracefulShutdown.isShuttingDown()) {
+    socket.destroy()
+    return
+  }
   if (backupService.isRestoring) {
     socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n')
     return
@@ -1306,6 +1376,7 @@ server.on('upgrade', (req, socket, head) => {
   if (clusterRoutes.handleUpgrade(req, socket, head)) return
   if (!slotShell.handleUpgrade(req, socket, head)) socket.destroy()
 })
+gracefulShutdown.setServer(server)
 
 server.on('clientError', (err, socket) => {
   try {
@@ -1355,65 +1426,9 @@ fs.writeFileSync(path.join(cfg.paths.root, 'config', 'gateway-v2.public.json'), 
 process.on('uncaughtException', (e) => console.error('[uncaught]', e))
 process.on('unhandledRejection', (e) => console.error('[unhandled]', e))
 
-// Graceful shutdown: stop schedulers/watchers, close the DB (WAL checkpoint).
-let _shuttingDown = false
-function shutdown(signal) {
-  if (_shuttingDown) return
-  _shuttingDown = true
-  installJevUsageRecorder(null)
-  console.log(`[shutdown] ${signal} — closing`)
-  try {
-    vmTestSchedule.stop()
-    qualityRunner.stop()
-  } catch {}
-  try {
-    backupService.stopScheduler()
-  } catch {}
-  try {
-    proxyPool.stopScheduler()
-  } catch {}
-  try {
-    healthMonitor?.stop?.()
-  } catch {}
-  try {
-    credentialRefreshMonitor?.stop?.()
-    codexMailboxService(cfg.paths.project).stop()
-  } catch {}
-  try {
-    kernelWatchdog?.stop?.()
-  } catch {}
-  try {
-    cliNodeGuard?.stop?.()
-  } catch {}
-  try {
-    usageProbeMonitor?.stop?.()
-  } catch {}
-  try {
-    catalogMonitor?.stop?.()
-  } catch {}
-
-  try {
-    notifyMonitor?.stop?.()
-  } catch {}
-  try {
-    stopVmWatch()
-  } catch {}
-  try {
-    stopAllRustKernels()
-  } catch {}
-  try {
-    clusterManager.stop()
-  } catch {}
-  try {
-    server.close(() => {})
-  } catch {}
-  try {
-    closeDatabase()
-  } catch {}
-  process.exit(0)
-}
-process.on('SIGTERM', () => shutdown('SIGTERM'))
-process.on('SIGINT', () => shutdown('SIGINT'))
+// Graceful shutdown on termination signals (Issue #376).
+process.on('SIGTERM', () => gracefulShutdown.shutdown('SIGTERM'))
+process.on('SIGINT', () => gracefulShutdown.shutdown('SIGINT'))
 
 if (process.env.KIN_CRS_MOCK !== '1') {
   syncLocalSlotRestartPolicies(listVms(cfg.paths.project))

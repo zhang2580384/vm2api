@@ -635,6 +635,7 @@ function VmDetailBody({
             <>
               <VmOpsTab
                 vm={vm}
+                kernel={kernel}
                 proxy={proxy}
                 officialCc={officialCc}
                 credType={credType}

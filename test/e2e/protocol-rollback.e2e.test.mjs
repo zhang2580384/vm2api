@@ -113,7 +113,7 @@ test('v2.4.4 source, database, configuration and pinned payload remain usable af
     )
     await gw.stop()
     db = new DatabaseSync(dbPath)
-    assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v, '048')
+    assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v, '049')
     assert.equal(
       JSON.parse(db.prepare('SELECT value FROM settings WHERE key=?').get('fictional-quality-recovery').value)
         .unknown_action,

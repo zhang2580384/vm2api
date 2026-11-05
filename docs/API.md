@@ -46,7 +46,7 @@ x-api-key: sk-vm-…
 | `GET` | `/health` · `/` · `/v1/meta` | 无鉴权 | 能力 / 限制 / 计数 |
 
 上游 hop **永远** `stream: true`。客户端 `stream: true` 收 SSE；`stream: false` 或 `x-kin-delivery: verified` 由网关聚合成 JSON。
-OpenAI 模型页的 Fast 开关只对已同步、已启用且目录明确声明 `service_tiers[].id = "priority"` 的模型生效。客户端使用 `<model>-fast` 时，网关在调度前还原基模型并发送 `service_tier: "priority"`；普通模型 ID 和普通档位不改写。图像目录包含启用的 `gpt-image-2`（及 `gpt-image-2-2026-04-21` 快照）、`gpt-image-2.5-flare` 和 `gpt-image-2.5-sunburst`；Images 请求直连 Codex Images 槽位，Free 套餐槽位不参与。
+OpenAI 模型页的 Fast 开关只对已同步、已启用且目录明确声明 `service_tiers[].id = "priority"` 的模型生效。客户端使用 `<model>-fast` 时，网关在调度前还原基模型并发送 `service_tier: "priority"`；普通模型 ID 和普通档位不改写。图像目录包含启用的 `gpt-image-2`（及 `gpt-image-2-2026-04-21` 快照）、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`、`gpt-image-2.6-flare` 和 `gpt-image-2.6-sunburst`；Images 请求直连 Codex Images 槽位，Free 套餐槽位不参与。
 `/v1/models` 列出的图像模型也可直接用在 `/v1/chat/completions` 与 `/v1/responses`：网关取最后一条 user 消息的文本作 prompt，经内置 Images 通道调用（该消息带 `image_url` / `input_image` 时走 `/images/edits`，否则 `/images/generations`）；顶层 `size`、`quality`、`background`、`output_format`、`output_compression`、`moderation`、`n`、`input_fidelity` 原样带上。Chat 返回 Markdown 图片（`![image 1](data:image/png;base64,…)`），Responses 返回 `image_generation_call` 输出项；`stream: true` 时等待期间发 SSE 注释保活。日志按 Images 行（`openai.images`）计费。
 
 别名路径（无 `/v1` 前缀）与上表相同处理函数。
@@ -95,7 +95,7 @@ curl -sS http://127.0.0.1:8787/v1/messages \
   }'
 ```
 
-必填：`model`、非空 `messages[]`（每条有 `role`，以及 `content` 或 `tool_calls`）。`max_tokens` 可省，缺省填 **128000**。
+必填：`model`、非空 `messages[]`（每条有 `role`，以及 `content` 或 `tool_calls`）。`max_tokens` 可省；没写则用该模型目录的 `max_tokens_default`。写了且低于面板 `min_max_tokens` 时默认抬到该值，模式「不改」则不抬。
 
 流式：`"stream": true`，响应 `text/event-stream`，事件与 Anthropic 相同（`message_start` … `message_stop`）。
 
