@@ -6,6 +6,7 @@ import path from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { describeKernelCatalog, pullKernelRelease } from '../../src/lib/admin/kernel-catalog.mjs'
 import { CRAG_V2_RELEASE_ASSET } from '../../src/lib/admin/release-kernel.mjs'
+import { GITHUB_REPO } from '../../src/lib/admin/release.mjs'
 import {
   cragV2Arch,
   cragV2PackageRoot,
@@ -64,7 +65,7 @@ function transport(files, { tag = 'v1.2.3', size, redirect } = {}) {
           assets: entries.map(([name, body], index) => ({
             name,
             size: size ?? body.length,
-            url: `https://api.github.com/repos/dofastted/vm2api/releases/assets/${index + 1}`,
+            url: `https://api.github.com/repos/${GITHUB_REPO}/releases/assets/${index + 1}`,
           })),
         }),
       )

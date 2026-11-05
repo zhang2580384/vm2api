@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
+import { GITHUB_REPO } from '../../src/lib/admin/release.mjs'
 import { authorizePanelRoute } from '../../src/lib/admin/panel-acl.mjs'
 import { getVm } from '../../src/lib/vm/vm-registry.mjs'
 import { cragLicenseDirectory } from '../../src/lib/vm/crag-license.mjs'
@@ -255,12 +256,12 @@ function releaseFetch() {
             {
               name: 'kin-kernel',
               size: payloads['1'].length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/1',
+              url: `https://api.github.com/repos/${GITHUB_REPO}/releases/assets/1`,
             },
             {
               name: 'cli-node',
               size: payloads['2'].length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/2',
+              url: `https://api.github.com/repos/${GITHUB_REPO}/releases/assets/2`,
             },
           ],
         }),
