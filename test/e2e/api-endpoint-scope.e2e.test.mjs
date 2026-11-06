@@ -20,8 +20,12 @@ test('API endpoint protocol scopes, official catalogs and public cache schema ov
   // Keep the checked-out source read-only, including in the native CI container.
   const sourceRoot = path.join(root, 'source')
   fs.mkdirSync(sourceRoot)
-  fs.cpSync(path.join(REPO_ROOT, 'src'), path.join(sourceRoot, 'src'), { recursive: true })
-  fs.copyFileSync(path.join(REPO_ROOT, 'VERSION'), path.join(sourceRoot, 'VERSION'))
+  for (const directory of ['src', 'scripts', 'deploy', 'docker']) {
+    fs.cpSync(path.join(REPO_ROOT, directory), path.join(sourceRoot, directory), { recursive: true })
+  }
+  for (const file of ['VERSION', 'package.json']) {
+    fs.copyFileSync(path.join(REPO_ROOT, file), path.join(sourceRoot, file))
+  }
   fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(sourceRoot, 'node_modules'), 'dir')
   const socket = path.join(root, 'api.sock')
   const captures = []
