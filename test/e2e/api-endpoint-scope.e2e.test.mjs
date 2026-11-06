@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { startGateway, api } from '../harness.mjs'
+import { startGateway, api, REPO_ROOT } from '../harness.mjs'
 const evidence = []
 test.after(() => {
   if (process.env.KIN_PROTOCOL_EVIDENCE_DIR)
@@ -16,6 +16,13 @@ test.after(() => {
 
 test('API endpoint protocol scopes, official catalogs and public cache schema over HTTP', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'api048-'))
+  // Gateway startup writes its public configuration snapshot under src/config.
+  // Keep the checked-out source read-only, including in the native CI container.
+  const sourceRoot = path.join(root, 'source')
+  fs.mkdirSync(sourceRoot)
+  fs.cpSync(path.join(REPO_ROOT, 'src'), path.join(sourceRoot, 'src'), { recursive: true })
+  fs.copyFileSync(path.join(REPO_ROOT, 'VERSION'), path.join(sourceRoot, 'VERSION'))
+  fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(sourceRoot, 'node_modules'), 'dir')
   const socket = path.join(root, 'api.sock')
   const captures = []
   const kernel = http.createServer(async (req, res) => {
@@ -62,7 +69,7 @@ test('API endpoint protocol scopes, official catalogs and public cache schema ov
   await new Promise((resolve) => kernel.listen(socket, resolve))
   let gw
   try {
-    gw = await startGateway({ readyMs: 60000, env: { KIN_API_KERNEL_SOCK: socket } })
+    gw = await startGateway({ sourceRoot, readyMs: 60000, env: { KIN_API_KERNEL_SOCK: socket } })
     const call = async (method, url, opts) => {
       const result = await api(gw, method, url, opts)
       evidence.push({
