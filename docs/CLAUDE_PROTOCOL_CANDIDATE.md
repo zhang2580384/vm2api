@@ -116,3 +116,7 @@ DSH 恢复默认关闭。Messages 与 Chat 的真实成功流经过正式 Failov
 上游已正式发布 v1.4.048；本次合入精确主线 `dd9b2b02`。已单独采用的 #904 排空计时器修复与主线合并一致，唯一冲突为 VERSION，继续保留自有 2.4.4。新增 API 密钥按端点协议隔离、官方端点模型目录扩展、`/models` 别名和 Anthropic API 跳转前非法缓存字段清理。API 类别不绑定 VM 白名单或账号池；OAuth 类别继续受原有范围限制。自有恢复维护检查、迁移 043/044–049、count_tokens 凭据分流和保护功能保留。
 
 固定 payload 及 ARM64 源码声明没有变化。系统 5m 被 CLI 变为 1h、custom 环境关闭、Haiku 显式预算上限和旧契约验收继续独立阻断；不能把 API 缓存字段清理当作固定 CLI 修复。当前分支仍 `merge_ready=false`，不产生协议升级 PR、tag、Release 或生产更改。本次独立 HTTP、完整 CI 和产物的结果以精确执行 SHA 的仓库外记录为准。
+
+本轮补齐 #835 的真实 HTTP → 正式 handleProtocol / Codex 调度和客户端 → 精确 Codex kernel ELF → 虚构 localhost 接收端，四个场景通过，覆盖 stream 开关及字符串/文本块工具结果，保留 call_id、工具名、JSON 参数、结果和顺序。kernel SHA-256 为 `afdb433ebf3c719eb8596e09ca6493e8f769af1aab136426e82cbcd54c9bdc4a`；只投影临时配置的本地测试端点，使用虚构 OAuth 凭据，没有调用真实模型。首次接收端未处理 zstd，原始失败保留；后续只补接收端解压，不改生产转换器或原断言。
+
+新增 API HTTP 六项通过，验证两个模型列表别名、协议范围阻断、官方端点扩展目录、API 清除 VM 范围以及 OAuth 仍需 VM。缓存检查按现有模板生成后的块身份定位，验证所有保留标记仅含 type/ttl、调用方正文仍在消息 reminder、工具名按既有 mcp__ 规则；它不接受原始布局或整个 API/OAuth 契约。初稿的无效 pool id、字符串/数组观察器和未经配置的 GPT 模型输入均有原日志保留。两份新 e2e 已加入同一 network=none 原生 CI；旧 TTL/环境/历史/工具断言保持。
