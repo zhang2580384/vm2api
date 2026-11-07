@@ -72,7 +72,11 @@ function startHelper({ bin, directory }) {
   const child = spawn(bin, ['-sock', sock, '-key', key, '-capability', capabilityFile], {
     stdio: 'ignore',
   })
-  return { child, sock, capabilityFile }
+  const spawned = new Promise((resolve, reject) => {
+    child.once('spawn', resolve)
+    child.once('error', reject)
+  })
+  return { child, sock, capabilityFile, spawned }
 }
 
 export async function ensureRedaction(routing, { projectRoot, binPath } = {}) {
@@ -108,6 +112,7 @@ async function bootHelper(policy, { projectRoot, binPath }) {
   const directory = path.join(projectRoot || os.tmpdir(), 'data', 'redact')
   const helper = startHelper({ bin, directory })
   try {
+    await helper.spawned
     const capability = await waitForFile(helper.capabilityFile)
     const client = createRedactionClient({ socketPath: helper.sock, capability })
     await client.health()

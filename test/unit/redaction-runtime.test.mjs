@@ -36,6 +36,20 @@ describe('redaction runtime', () => {
     )
   })
 
+  it('rejects an unexecutable helper without an uncaught child-process error', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const unexecutable = path.join(root, 'unexecutable-helper')
+    fs.writeFileSync(unexecutable, 'fictional non-executable fixture', { mode: 0o600 })
+    await assert.rejects(
+      ensureRedaction(
+        { redaction: { enabled: true, secrets: true, personal: false, words: [], rules: [] } },
+        { projectRoot: root, binPath: unexecutable },
+      ),
+      (error) => error.status === 503 && error.code === 'redaction_unavailable',
+    )
+  })
+
   it('masks and restores through the real helper when enabled', { timeout: 60_000 }, async () => {
     if (process.env.KIN_REDACT_TEST_BIN) fs.copyFileSync(process.env.KIN_REDACT_TEST_BIN, bin)
     else
