@@ -208,10 +208,39 @@ export function createSseRestorer(ctx) {
         return line
       }
       const index = event.index ?? 0
+      const fields = []
       for (const [parent, field] of TEXT_FIELDS) {
         const holder = event[parent]
         if (!holder || typeof holder[field] !== 'string') continue
-        const key = `${index}:${parent}.${field}`
+        fields.push({ holder, field, key: `${index}:${parent}.${field}` })
+      }
+      // Responses uses a string delta rather than Anthropic's delta object.
+      // Keep separate item/content streams isolated while joining tag tails.
+      if (typeof event.delta === 'string' && /\.(?:delta)$/.test(event.type || '')) {
+        fields.push({
+          holder: event,
+          field: 'delta',
+          key: `${event.type}:${event.item_id || event.output_index || 0}:${event.content_index || 0}`,
+        })
+      }
+      // API endpoints may emit Chat Completions directly.
+      for (const choice of event.choices || []) {
+        for (const field of ['content', 'reasoning_content']) {
+          if (typeof choice.delta?.[field] === 'string') {
+            fields.push({ holder: choice.delta, field, key: `chat:${choice.index || 0}:${field}` })
+          }
+        }
+        for (const tool of choice.delta?.tool_calls || []) {
+          if (typeof tool.function?.arguments === 'string') {
+            fields.push({
+              holder: tool.function,
+              field: 'arguments',
+              key: `chat:${choice.index || 0}:tool:${tool.index || 0}`,
+            })
+          }
+        }
+      }
+      for (const { holder, field, key } of fields) {
         let text = `${carry.get(key) || ''}${holder[field]}`
         const tail = incompleteTagTail(text)
         if (tail) {
