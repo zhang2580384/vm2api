@@ -75,6 +75,7 @@ export const ROUTE_VIEWS = {
   '/import': 'import',
   '/specs': 'specs',
   '/proxies': 'proxies',
+  '/credentials': 'credentials',
   '/billing': 'billing',
   '/models': 'models',
   '/risk': 'risk',

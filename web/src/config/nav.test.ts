@@ -27,6 +27,7 @@ const PANEL_VIEWS: ViewId[] = [
   'import',
   'specs',
   'proxies',
+  'credentials',
   'models',
   'risk',
   'system',
@@ -44,7 +45,7 @@ const PANEL_VIEWS: ViewId[] = [
 const ROLE_VIEWS: Record<'admin' | 'super' | 'user', ViewId[]> = {
   admin: PANEL_VIEWS,
   super: ['overview', 'cluster', 'logs', 'statistics', 'vm'],
-  user: ['vm', 'proxies', 'keys', 'billing', 'logs', 'statistics'],
+  user: ['vm', 'proxies', 'credentials', 'keys', 'billing', 'logs', 'statistics'],
 }
 
 const concrete = (path: string) =>
@@ -135,6 +136,7 @@ describe('pages each role can open', () => {
     expect(openPages(ROLE_VIEWS.user)).toEqual([
       '/',
       '/billing',
+      '/credentials',
       '/keys',
       '/logs',
       '/proxies',
