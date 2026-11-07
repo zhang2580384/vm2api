@@ -45,7 +45,15 @@ const PANEL_VIEWS: ViewId[] = [
 const ROLE_VIEWS: Record<'admin' | 'super' | 'user', ViewId[]> = {
   admin: PANEL_VIEWS,
   super: ['overview', 'cluster', 'logs', 'statistics', 'vm'],
-  user: ['vm', 'proxies', 'credentials', 'keys', 'billing', 'logs', 'statistics'],
+  user: [
+    'vm',
+    'proxies',
+    'credentials',
+    'keys',
+    'billing',
+    'logs',
+    'statistics',
+  ],
 }
 
 const concrete = (path: string) =>
