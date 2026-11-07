@@ -1,11 +1,23 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { startGateway, api } from '../harness.mjs'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { startGateway, api, REPO_ROOT } from '../harness.mjs'
 
 const MODEL = 'claude-haiku-4-5-20251001'
 
 test('managed keys read their own quota and usage; expired keys still can, disabled cannot', async () => {
-  const gw = await startGateway()
+  // Gateway startup writes a public snapshot. Keep a read-only checkout intact.
+  const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'key-self-source-'))
+  for (const directory of ['src', 'scripts', 'deploy', 'docker']) {
+    fs.cpSync(path.join(REPO_ROOT, directory), path.join(sourceRoot, directory), { recursive: true })
+  }
+  for (const file of ['VERSION', 'package.json']) {
+    fs.copyFileSync(path.join(REPO_ROOT, file), path.join(sourceRoot, file))
+  }
+  fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(sourceRoot, 'node_modules'), 'dir')
+  const gw = await startGateway({ sourceRoot, readyMs: 60000 })
   try {
     const create = async (body) => {
       const created = await api(gw, 'POST', '/api/panel/api-keys', { body })
