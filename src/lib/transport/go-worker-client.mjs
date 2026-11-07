@@ -644,6 +644,7 @@ export async function callGoWorker({
     const parsed = prepared.redaction ? await restoreJsonValue(parsedRaw, prepared.redaction) : parsedRaw
     const headers = mergeRateLimitHeaders(publicHeaders(response.headers))
     const ok = response.statusCode >= 200 && response.statusCode < 300 && parsed?.type !== 'error'
+    if (ok) rememberThreadTurn(parsed?.id, prepared.thread)
     return restoreKernelErrorStatus({
       ok,
       status: response.statusCode || 0,

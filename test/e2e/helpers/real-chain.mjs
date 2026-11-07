@@ -110,7 +110,7 @@ export async function startRealChain({
         return res.end(json(body.model))
       }
       res.writeHead(200, { 'content-type': 'text/event-stream', 'request-id': 'req_303' })
-      res.end(upstreamSse || sse(body.model))
+      res.end((typeof upstreamSse === 'function' ? upstreamSse(body) : upstreamSse) || sse(body.model))
     })
     await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve))
     cleanups.push(async () => {
@@ -201,7 +201,7 @@ export async function startRealChain({
       claude: { mode: 'api-key' },
       runtime: { kernel_socket: socketPath, worker_token_file: tokenPath, worker_run_dir: temp },
     }
-    const exec = { vmId: vm.id, vm, homeDir, oauth: {}, timezone }
+    const exec = { vmId: vm.id, vm, homeDir, projectRoot: temp, oauth: {}, timezone }
     const routingPath = path.join(temp, 'routing.json')
     const buildRouting = () => {
       if (!routingBase) {

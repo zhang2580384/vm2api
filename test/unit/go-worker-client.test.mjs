@@ -14,6 +14,7 @@ import {
   restoreUncommittedHop,
   semanticStatusForStreamError,
 } from '../../src/lib/transport/go-worker-client.mjs'
+import { pinThreadBetas, resetThreadBetasForTest } from '../../src/lib/protocol/thread-betas.mjs'
 import { prepareCliHopBody } from '../../src/lib/protocol/outbound-attempt.mjs'
 import { callerAutoCompactWindow, defaultSeedPolicy, sanitizeInboundBody } from '../../src/lib/protocol/seed-policy.mjs'
 import { extractOpenaiUsage } from '../../src/lib/protocol/openai-usage.mjs'
@@ -385,6 +386,37 @@ unixTest('callGoWorker and streamGoWorker report exactly the envelope they post'
       assert.match(envelope.body.system[0].text, /\bcch=[0-9a-f]{5};/)
     }
   } finally {
+    await fx.close()
+  }
+})
+
+unixTest('a successful non-stream worker turn pins betas for the next thread turn', async () => {
+  resetThreadBetasForTest()
+  const fx = await fixture(async (req, res) => {
+    for await (const _chunk of req) {
+    }
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ id: 'msg_nonstream_beta_pin', type: 'message', role: 'assistant', content: [] }))
+  })
+  try {
+    const result = await callGoWorker({
+      exec: fx.exec,
+      body: {
+        model: 'claude-opus-5-5',
+        thread: { type: 'create' },
+        messages: [{ role: 'user', content: 'fictional turn' }],
+      },
+    })
+    assert.equal(result.ok, true)
+    assert.ok(result.threadBetas.betas.length > 0)
+    const resumed = pinThreadBetas(
+      { model: 'claude-opus-5-5', thread: { type: 'continue', previous_message_id: result.body.id } },
+      [],
+    )
+    assert.equal(resumed.turn.pin, 'pinned')
+    assert.deepEqual(resumed.betas, result.threadBetas.betas)
+  } finally {
+    resetThreadBetasForTest()
     await fx.close()
   }
 })

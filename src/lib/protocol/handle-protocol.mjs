@@ -549,6 +549,7 @@ export function createHandleProtocol(deps) {
       redactionPrincipal,
       redactionSession,
       onEnvelope,
+      onOutboundHeaders,
       onEvent: async (line) => {
         if (/response_headers/.test(String(line))) return
         applyClaudeSSELineToMessage(restoreToolNamesInSSELine(line, toolNames), assembler)

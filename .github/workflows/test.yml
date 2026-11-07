@@ -46,6 +46,7 @@ jobs:
           cache-dependency-path: |
             worker/go.sum
             api-kernel/go.sum
+            redact/go.sum
       - uses: pnpm/action-setup@v6
         with:
           version: 10
@@ -55,7 +56,7 @@ jobs:
       - name: format and syntax
         run: |
           npx biome format
-          test -z "$(gofmt -l worker api-kernel)" || { gofmt -l worker api-kernel; exit 1; }
+          test -z "$(gofmt -l worker api-kernel redact)" || { gofmt -l worker api-kernel redact; exit 1; }
           find src scripts -name '*.mjs' -print0 | xargs -0 -n1 node --check
       - name: pinned payload
         run: |
@@ -72,6 +73,7 @@ jobs:
         run: |
           (cd worker && go vet ./... && go test ./...)
           (cd api-kernel && go vet ./... && go test ./...)
+          (cd redact && go vet ./... && go test ./...)
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -126,6 +128,10 @@ jobs:
       - name: build worker source without replacing the pinned artifact
         working-directory: worker
         run: CGO_ENABLED=0 go build -buildvcs=false -trimpath -o "$RUNNER_TEMP/worker-from-source" ./cmd/kin-worker
+      - name: build and smoke redaction helper source without replacing pinned artifacts
+        run: |
+          (cd redact && CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o "$RUNNER_TEMP/redactor-from-source" ./cmd/kin-redact)
+          python3 test/deploy/smoke_redact.py "$RUNNER_TEMP/redactor-from-source" | tee "$RUNNER_TEMP/protocol-evidence/redactor-amd64.log"
       - name: offline pinned and rebuilt AMD64 worker OAuth contracts
         run: |
           set -euo pipefail
@@ -142,12 +148,13 @@ jobs:
             -v "$PWD:/candidate:ro" -v "$RUNNER_TEMP/previous-vm2api:/previous:ro" \
             -v "$PWD/node_modules:/previous/node_modules:ro" \
             -v "$RUNNER_TEMP/protocol-evidence:/evidence:rw" \
+            -v "$RUNNER_TEMP/redactor-from-source:/redactor-from-source:ro" \
             -w /candidate -e NODE_ENV=test -e KIN_PREVIOUS_SOURCE=/previous \
             -e KIN_303_KERNEL=/candidate/share/wrap-cli/kin-kernel \
             -e KIN_303_CLI=/candidate/share/wrap-cli/cli-node \
-            -e KIN_PROTOCOL_EVIDENCE_DIR=/evidence \
+            -e KIN_PROTOCOL_EVIDENCE_DIR=/evidence -e KIN_REDACT_BIN=/redactor-from-source \
             --entrypoint node node:22-bookworm-slim \
-            --test --test-reporter=tap test/e2e/protocol-native-matrix.e2e.test.mjs test/e2e/protocol-persona-switch.e2e.test.mjs test/e2e/protocol-cache-prefix.e2e.test.mjs test/e2e/protocol-history-cache.e2e.test.mjs test/e2e/protocol-cache-policy.e2e.test.mjs test/e2e/protocol-thinking-prune.e2e.test.mjs test/e2e/protocol-rollback.e2e.test.mjs test/e2e/protocol-codex-history.e2e.test.mjs test/e2e/api-endpoint-scope.e2e.test.mjs
+            --test --test-reporter=tap test/e2e/protocol-native-matrix.e2e.test.mjs test/e2e/protocol-persona-switch.e2e.test.mjs test/e2e/protocol-cache-prefix.e2e.test.mjs test/e2e/protocol-history-cache.e2e.test.mjs test/e2e/protocol-cache-policy.e2e.test.mjs test/e2e/protocol-thinking-prune.e2e.test.mjs test/e2e/protocol-rollback.e2e.test.mjs test/e2e/protocol-codex-history.e2e.test.mjs test/e2e/api-endpoint-scope.e2e.test.mjs test/e2e/protocol-redaction.e2e.test.mjs
       - uses: actions/upload-artifact@v6
         if: always()
         with:
@@ -169,6 +176,12 @@ jobs:
           docker run --network none --cpus 2 --memory 3g --pids-limit 256 \
             --entrypoint python3 -v "$PWD/test/deploy/smoke_native_cli.py:/smoke.py:ro" \
             vm2api-native-cli-ci /smoke.py
+      - name: offline packaged ARM64 redaction helper
+        run: |
+          docker run --rm --network none --read-only --cpus 2 --memory 512m \
+            --tmpfs /tmp:rw,exec,size=128m \
+            --entrypoint python3 -v "$PWD/test/deploy/smoke_redact.py:/redact-smoke.py:ro" \
+            vm2api-native-cli-ci /redact-smoke.py /opt/vm2api/image-bin/kin-redact
       - name: offline rebuilt ARM64 worker OAuth contracts
         run: |
           docker run --rm --network none --read-only --cpus 2 --memory 512m \

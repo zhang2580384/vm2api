@@ -822,6 +822,7 @@ export async function handleCodexProtocol({
               redactionPrincipal: req.apiKeyRecord?.id || (req.apiKeyKind === 'master' ? 'master' : ''),
               redactionSession: String(req.headers?.['x-session-id'] || inboundSession.session_id || ''),
               body: outboundBody,
+              reqHeaders: req.headers,
               envelope: {
                 body: outboundBody,
                 headers: outboundHeaders,
@@ -1242,6 +1243,7 @@ export async function handleCodexSearch({
   }
   const outbound = { ...body }
   for (const key of CODEX_SEARCH_DROP_FIELDS) delete outbound[key]
+  const turnMetadata = headerString(req.headers, 'x-codex-turn-metadata')
   const redactionState = await ensureRedaction(routing, { projectRoot })
   const redaction = redactionState.enabled
     ? {
