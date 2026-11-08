@@ -162,6 +162,14 @@ export function readFileVerifiedCached(file) {
 
 const parsedJsonCache = new Map()
 
+function putParsedJsonCache(file, entry) {
+  parsedJsonCache.delete(file)
+  parsedJsonCache.set(file, entry)
+  if (parsedJsonCache.size > VM_READ_CACHE_MAX_ENTRIES) {
+    parsedJsonCache.delete(parsedJsonCache.keys().next().value)
+  }
+}
+
 function routingJsonDigest(text) {
   return crypto.createHash('sha256').update(text).digest('hex')
 }
@@ -173,10 +181,16 @@ function routingJsonDigest(text) {
  */
 export function readJsonParsedCached(file) {
   const text = readFileVerifiedCached(file)
-  if (text == null) return null
+  if (text == null || !readCacheEnabled) {
+    parsedJsonCache.delete(file)
+    return text == null ? null : JSON.parse(text)
+  }
   const digest = routingJsonDigest(text)
   const hit = parsedJsonCache.get(file)
-  if (hit && hit.digest === digest) return structuredClone(hit.parsed)
+  if (hit && hit.digest === digest) {
+    putParsedJsonCache(file, hit)
+    return structuredClone(hit.parsed)
+  }
   let parsed
   try {
     parsed = JSON.parse(text)
@@ -184,7 +198,7 @@ export function readJsonParsedCached(file) {
     parsedJsonCache.delete(file)
     throw err
   }
-  parsedJsonCache.set(file, { digest, parsed })
+  putParsedJsonCache(file, { digest, parsed })
   return structuredClone(parsed)
 }
 
@@ -212,8 +226,10 @@ export function invalidateVmSlotReadCache(projectRoot, id) {
   invalidateReadCache(path.join(projectRoot, 'vms', `${id}.json`))
   const home = path.join(projectRoot, 'vms', id)
   const prefix = home + path.sep
-  for (const file of readCache.keys()) {
-    if (file === home || file.startsWith(prefix)) readCache.delete(file)
+  for (const cache of [readCache, parsedJsonCache]) {
+    for (const file of cache.keys()) {
+      if (file === home || file.startsWith(prefix)) cache.delete(file)
+    }
   }
 }
 
