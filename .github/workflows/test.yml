@@ -7,19 +7,221 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  workflow_call:
 
 # Only PR runs supersede each other; every main push keeps its own verdict so
 # it is visible when main turned red and when it recovered.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  ci:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        if: github.event_name != 'workflow_dispatch'
+        id: filter
+        with:
+          filters: |
+            docs:
+              - 'README.md'
+              - 'CHANGELOG.md'
+              - 'docs/**'
+              - 'VERSION'
+            non_docs:
+              - '**'
+              - '!README.md'
+              - '!CHANGELOG.md'
+              - '!docs/**'
+              - '!VERSION'
+      - id: classify
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.filter.outputs.docs }}" = "true" ] && [ "${{ steps.filter.outputs.non_docs }}" != "true" ]; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  ci-lite:
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: merge current base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "$BASE_REF"
+          git -c user.name=ci -c user.email=ci@localhost merge --no-edit FETCH_HEAD
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            worker/go.sum
+            api-kernel/go.sum
+            redact/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: format and syntax
+        run: |
+          npx biome format
+          test -z "$(gofmt -l worker api-kernel redact)" || { gofmt -l worker api-kernel redact; exit 1; }
+          find src scripts -name '*.mjs' -print0 | xargs -0 -n1 node --check
+
+  ci-prep:
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: merge current base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "$BASE_REF"
+          git -c user.name=ci -c user.email=ci@localhost merge --no-edit FETCH_HEAD
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            worker/go.sum
+            api-kernel/go.sum
+            redact/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: format and syntax
+        run: |
+          npx biome format
+          test -z "$(gofmt -l worker api-kernel redact)" || { gofmt -l worker api-kernel redact; exit 1; }
+          find src scripts -name '*.mjs' -print0 | xargs -0 -n1 node --check
+      - name: pinned payload
+        run: |
+          node scripts/fetch-payload.mjs
+          node scripts/fetch-payload.mjs --check
+      - name: native CLI packaging unit tests
+        run: python3 -m unittest discover -s test/deploy -p test_native_cli.py -v
+
+  ci-unit:
+    needs: [changes, ci-prep]
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: merge current base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "$BASE_REF"
+          git -c user.name=ci -c user.email=ci@localhost merge --no-edit FETCH_HEAD
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: fetch and verify pinned unit-test payload
+        run: |
+          node scripts/fetch-payload.mjs
+          node scripts/fetch-payload.mjs --check
+      - run: npm run test:unit
+
+  ci-go:
+    needs: [changes, ci-prep]
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: merge current base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "$BASE_REF"
+          git -c user.name=ci -c user.email=ci@localhost merge --no-edit FETCH_HEAD
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            worker/go.sum
+            api-kernel/go.sum
+            redact/go.sum
+      - name: go vet and test
+        run: |
+          (cd worker && go vet ./... && go test ./...)
+          (cd api-kernel && go vet ./... && go test ./...)
+          (cd redact && go vet ./... && go test ./...)
+
+  ci-web:
+    needs: [changes, ci-prep]
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: merge current base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "$BASE_REF"
+          git -c user.name=ci -c user.email=ci@localhost merge --no-edit FETCH_HEAD
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+          cache: true
+          cache_dependency_path: web/pnpm-lock.yaml
+      - name: web
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm format:check
+          pnpm test
+          pnpm build
+
+  ci-compatibility:
+    needs: [changes, ci-prep]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -47,33 +249,15 @@ jobs:
             worker/go.sum
             api-kernel/go.sum
             redact/go.sum
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10
-          cache: true
-          cache_dependency_path: web/pnpm-lock.yaml
       - run: npm ci
-      - name: format and syntax
-        run: |
-          npx biome format
-          test -z "$(gofmt -l worker api-kernel redact)" || { gofmt -l worker api-kernel redact; exit 1; }
-          find src scripts -name '*.mjs' -print0 | xargs -0 -n1 node --check
       - name: pinned payload
         run: |
           node scripts/fetch-payload.mjs
           node scripts/fetch-payload.mjs --check
-      - name: native CLI packaging unit tests
-        run: python3 -m unittest discover -s test/deploy -p test_native_cli.py -v
-      - run: npm run test:unit
       - name: offline backup and cloud restore end-to-end
         run: node --test test/e2e/backup.e2e.test.mjs test/e2e/panel-proxy-domain-forward.e2e.test.mjs
       - name: protocol configuration and count-tokens HTTP compatibility
         run: node --test test/e2e/persona-migration.e2e.test.mjs
-      - name: go vet and test
-        run: |
-          (cd worker && go vet ./... && go test ./...)
-          (cd api-kernel && go vet ./... && go test ./...)
-          (cd redact && go vet ./... && go test ./...)
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -88,15 +272,10 @@ jobs:
           python test/codex-registration-browser-test.py
           node --input-type=module -e "import {SLOT_SUPERVISOR} from './src/lib/oauth/codex-mailbox-runtime.mjs'; process.stdout.write(SLOT_SUPERVISOR)" > "$RUNNER_TEMP/mailbox-supervisor.py"
           MAILBOX_SUPERVISOR_SOURCE="$RUNNER_TEMP/mailbox-supervisor.py" python test/codex-mailbox-supervisor-test.py
-      - name: web
-        working-directory: web
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm format:check
-          pnpm test
-          pnpm build
 
   protocol-native-acceptance:
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -163,6 +342,8 @@ jobs:
           if-no-files-found: ignore
 
   arm64-native-cli:
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
