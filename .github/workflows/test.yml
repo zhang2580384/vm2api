@@ -7,11 +7,16 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      force_full:
+        type: boolean
+        default: true
 
 # Only PR runs supersede each other; every main push keeps its own verdict so
 # it is visible when main turned red and when it recovered.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -27,7 +32,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dorny/paths-filter@v3
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' && inputs.force_full != true
         id: filter
         with:
           filters: |
@@ -44,7 +49,7 @@ jobs:
               - '!VERSION'
       - id: classify
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ inputs.force_full }}" = "true" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
           elif [ "${{ steps.filter.outputs.docs }}" = "true" ] && [ "${{ steps.filter.outputs.non_docs }}" != "true" ]; then
             echo "docs_only=true" >> "$GITHUB_OUTPUT"
