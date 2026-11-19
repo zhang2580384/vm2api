@@ -61,6 +61,21 @@ jobs:
         run: |
           node scripts/fetch-payload.mjs
           node scripts/fetch-payload.mjs --check
+      - name: Codex 6.2 kernel over loopback HTTP and WebSocket
+        run: |
+          fixture=$(mktemp -d)
+          mkdir -p "$fixture/bin" "$fixture/deploy"
+          cp -R src scripts test node_modules VERSION package.json "$fixture/"
+          # The gateway writes its public startup snapshot; keep that output in the container tmpfs.
+          ln -sf /tmp/gateway-v2.public.json "$fixture/src/config/gateway-v2.public.json"
+          cp deploy/payload.json "$fixture/deploy/"
+          cp bin/kin-codex-kernel "$fixture/bin/"
+          CGO_ENABLED=0 go -C api-kernel build -o "$fixture/bin/kin-api-kernel" ./cmd/kin-api-kernel
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,mode=1777 -e HOME=/tmp \
+            -v "$fixture:/project:ro" -w /project -e KIN_CODEX_TEST_BIN=/project/bin/kin-codex-kernel \
+            -e KIN_API_KERNEL_BIN=/project/bin/kin-api-kernel node:22-bookworm-slim \
+            node --test test/e2e/codex-62.e2e.test.mjs
       - run: npm run test:unit
       - name: offline backup and cloud restore end-to-end
         run: node --test test/e2e/backup.e2e.test.mjs test/e2e/panel-proxy-domain-forward.e2e.test.mjs

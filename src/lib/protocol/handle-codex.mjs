@@ -3,6 +3,7 @@ import { recordMailboxAuthFailure } from '../oauth/codex-mailbox-events.mjs'
  * Codex hop from handle-protocol. Claude convert/pool/CRS never runs here.
  */
 import path from 'node:path'
+import { fromClaudeToOpenAIChat, fromClaudeToOpenAICompletions, isClientStream } from './convert.mjs'
 import { getVm, listVms, persistCodexUsage, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isValidVmId, listVmRecordFiles, readJsonCached } from '../vm/vm-file.mjs'
 import { isCodexProtocolAllowed, isCodexVm, normalizeCodexRouting } from './codex-route.mjs'
@@ -627,7 +628,10 @@ export async function handleCodexProtocol({
       },
     })
   }
-  const stream = inbound?.stream !== false && ctx.body?.stream !== false
+  const stream =
+    protocol === 'anthropic.messages'
+      ? inbound?.stream !== false && ctx.body?.stream !== false
+      : isClientStream(ctx.body, req.headers)
   const inboundSession = sessionFrom(req, converted.body)
   const sessionMode = outboundSessionMode(routing)
   const callerSession = extractCallerSession({
@@ -644,7 +648,7 @@ export async function handleCodexProtocol({
   const anthropicSse = protocol === 'anthropic.messages' ? createAnthropicSseState() : null
   const chatSse =
     protocol === 'openai.chat' || protocol === 'openai.completions'
-      ? { id: 'codex', seq: 0, tools: new Map(), sawTool: false }
+      ? { id: 'codex', model: converted.body.model, protocol, seq: 0, tools: new Map(), sawTool: false }
       : null
   const pickOpts = {
     stickyRouter,
@@ -937,10 +941,14 @@ export async function handleCodexProtocol({
             let body
             try {
               const assembled = assembleCodexBodyFromSse(chunks, result.body || {})
-              body =
-                protocol === 'anthropic.messages'
-                  ? codexBodyToAnthropicMessage(assembled, converted.body.model)
-                  : assembled
+              body = assembled
+              if (protocol !== 'openai.responses') {
+                const message = codexBodyToAnthropicMessage(assembled, converted.body.model)
+                if (protocol === 'openai.chat') body = fromClaudeToOpenAIChat(message, converted.body.model)
+                else if (protocol === 'openai.completions')
+                  body = fromClaudeToOpenAICompletions(message, converted.body.model)
+                else body = message
+              }
             } catch (error) {
               if (!isToolArgumentsError(error)) throw error
               stats.errors++

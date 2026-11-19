@@ -222,6 +222,8 @@ export function completionsToCodexResponses(body = {}) {
     stream: body.stream !== false,
     store: false,
   }
+  if (body.reasoning) out.reasoning = body.reasoning
+  if (body.reasoning_effort) out.reasoning_effort = body.reasoning_effort
   if (body.prompt_cache_key) out.prompt_cache_key = body.prompt_cache_key
   return out
 }
@@ -237,7 +239,7 @@ export function codexTextInput(text) {
   ]
 }
 
-export const CODEX_REASONING_EFFORTS = Object.freeze(['none', 'low', 'medium', 'high', 'xhigh', 'max'])
+export const CODEX_REASONING_EFFORTS = Object.freeze(['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
 export const DEFAULT_CODEX_REASONING_EFFORT = 'medium'
 
 export function normalizeCodexReasoningEffort(raw) {
@@ -332,11 +334,15 @@ export function createChatSseState(id = 'codex') {
   return { id, seq: 0, tools: new Map(), sawTool: false, finished: false }
 }
 
-function chatChunk(id, delta, finish, extra = {}) {
+function chatChunk(session, delta, finish, extra = {}) {
+  const legacy = session.protocol === 'openai.completions'
+  if (legacy && delta.content == null && !finish) return ''
   return `data: ${JSON.stringify({
-    id,
-    object: 'chat.completion.chunk',
-    choices: [{ index: 0, delta, finish_reason: finish ?? null }],
+    id: session.id,
+    object: legacy ? 'text_completion' : 'chat.completion.chunk',
+    model: session.model,
+    created: (session.created ??= Math.floor(Date.now() / 1000)),
+    choices: [{ index: 0, ...(legacy ? { text: delta.content || '' } : { delta }), finish_reason: finish ?? null }],
     ...extra,
   })}\n\n`
 }
@@ -400,7 +406,7 @@ export function responsesSseToChatChunk(line, id = 'codex', state = null) {
       name: item.name,
     })
     const calls = toolDoneDeltas(slot, item.arguments ?? item.input)
-    return calls.length ? chatChunk(session.id, { tool_calls: calls }) : null
+    return calls.length ? chatChunk(session, { tool_calls: calls }) : null
   }
   if (type === 'response.function_call_arguments.delta' || type === 'response.custom_tool_call_input.delta') {
     const slot = bindTool(session, [event.output_index, event.item_id])
@@ -411,21 +417,21 @@ export function responsesSseToChatChunk(line, id = 'codex', state = null) {
       slot.args += event.delta
       calls.push({ index: slot.index, function: { arguments: event.delta } })
     }
-    return calls.length ? chatChunk(session.id, { tool_calls: calls }) : null
+    return calls.length ? chatChunk(session, { tool_calls: calls }) : null
   }
   if (type === 'response.function_call_arguments.done' || type === 'response.custom_tool_call_input.done') {
     const slot = bindTool(session, [event.output_index, event.item_id], { name: event.name })
     const calls = toolDoneDeltas(slot, event.arguments ?? event.input)
-    return calls.length ? chatChunk(session.id, { tool_calls: calls }) : null
+    return calls.length ? chatChunk(session, { tool_calls: calls }) : null
   }
   if (type.startsWith('response.reasoning_') && typeof event.delta === 'string' && event.delta) {
-    return chatChunk(session.id, { reasoning_content: event.delta })
+    return chatChunk(session, { reasoning_content: event.delta })
   }
   if (
     type === 'response.output_text.delta' ||
     (typeof event.delta === 'string' && event.delta && type !== 'response.completed' && type !== 'response.done')
   ) {
-    return chatChunk(session.id, { content: event.delta || event.text || '' })
+    return chatChunk(session, { content: event.delta || event.text || '' })
   }
   if (type === 'response.completed' || type === 'response.done') {
     const calls = []
@@ -435,9 +441,9 @@ export function responsesSseToChatChunk(line, id = 'codex', state = null) {
       calls.push(...toolDoneDeltas(slot, item.arguments ?? item.input))
     }
     const usage = openaiChatUsageFromExtract(extractOpenaiUsage(event.response?.usage || event.usage))
-    const repaired = calls.length ? chatChunk(session.id, { tool_calls: calls }) : ''
+    const repaired = calls.length ? chatChunk(session, { tool_calls: calls }) : ''
     session.finished = true
-    return `${repaired}${chatChunk(session.id, {}, session.sawTool ? 'tool_calls' : 'stop', usage ? { usage } : {})}data: [DONE]\n\n`
+    return `${repaired}${chatChunk(session, {}, session.sawTool ? 'tool_calls' : 'stop', usage ? { usage } : {})}data: [DONE]\n\n`
   }
   return null
 }

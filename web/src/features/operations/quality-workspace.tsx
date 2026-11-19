@@ -1140,7 +1140,8 @@ function TaskEditor({
                       <option value='medium'>medium · 中</option>
                       <option value='high'>high · 高</option>
                       <option value='xhigh'>xhigh · 更高</option>
-                      <option value='max'>max · 最高</option>
+                      <option value='max'>max</option>
+                      <option value='ultra'>ultra</option>
                     </select>
                     <span className='text-muted-foreground'>
                       GPT 按所选强度发送；模型不支持时记录真实错误。Claude

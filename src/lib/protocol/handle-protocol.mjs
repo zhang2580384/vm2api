@@ -44,6 +44,7 @@ import { readRawBody } from '../http/respond.mjs'
 import { disjointOpenaiUsage } from './openai-usage.mjs'
 import { costColumnsFromUsage } from '../admin/pricing.mjs'
 import { detectInboundPlatform } from './platform-detect.mjs'
+import { isGptModelEnabled } from './gpt-model-policy.mjs'
 import { normalizeCodexRouting } from './codex-route.mjs'
 import { applyCodexInboundModelRewrite } from './codex-model-mapping.mjs'
 import { hasClaudeCode1mSuffix } from './context-1m.mjs'
@@ -744,6 +745,19 @@ export function createHandleProtocol(deps) {
       return
     }
     if (platform.platform === 'openai') {
+      // A saved off switch also applies to direct ids. Unlisted ids retain the existing pass-through route.
+      if (!isGptModelEnabled(platform.model, { allowUnlisted: true })) {
+        stats.errors++
+        logBag.error_code = 'model_disabled'
+        return json(res, 400, {
+          error: {
+            type: 'invalid_request_error',
+            code: 'model_disabled',
+            param: 'model',
+            message: `model '${platform.model}' is not enabled by gateway GPT model policy`,
+          },
+        })
+      }
       const routing = getRouting() || {}
       const codexSticky = {
         requestStartedAt: logCtx.t0,

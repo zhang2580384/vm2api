@@ -91,6 +91,8 @@ Go worker JSON 透传，不必因人设重建 worker。
 
 模型目录权威是面板 `model_policy`（`GET/PUT /api/panel/model-policy`）。`GET /v1/models` 与 `validateOfficialModel` 读这份集合，**禁止** hop 槽位 `/internal/v1/models`。`GET /v1/models` 只列出该 key 的 `group_type` 能调度的模型：`openai` 只列 GPT，`anthropic` 只列 Claude，`all` 与 master 两者都列。
 
+Codex 的回退目录默认启用 `gpt-6.2-astra` 和 `gpt-6.2-sol`。已同步账号目录的实例沿用账号返回的型号，新同步到的这两款默认启用，已有的禁用设置继续生效。Responses 可传 `reasoning.effort`，Chat 和 Completions 可传 `reasoning_effort`，包括 `ultra`。模型名按原值转发，显式配置的模型映射仍然生效。
+
 ## web_search
 
 五种人设方案只在末轮 user 提示词出现「搜索」/`search`/`web search` 时注入 `{type: web_search_20250305, name: web_search}`。调用方已声明则原样转发。`web_search=false` / `x-kin-web-search: false` / `tool_choice=none` 不补。官方 Claude Code 入站不注入。

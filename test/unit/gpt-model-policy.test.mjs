@@ -135,3 +135,27 @@ test('panel save keeps the synced catalog; only a sync writes it', (t) => {
   saveGptModelPolicy({ models: { 'gpt-7': { enabled: true, catalog: { context_window: 9 } } } })
   assert.equal(getGptModelPolicy().models['gpt-7'].catalog, undefined)
 })
+
+test('6.2 defaults apply on first discovery without overriding catalog removals or saved switches', (t) => {
+  withDb(t)
+  const astra = 'gpt-6.2-astra'
+  const sol = 'gpt-6.2-sol'
+  const enabled = () => listGptPolicyModels().map((row) => row.id)
+  assert.ok(enabled().includes(astra) && enabled().includes(sol))
+
+  // A pre-upgrade, synchronized policy has no fallback rows. Its account still owns the catalog.
+  new SettingsRepo().set('gpt_model_policy', { source: 'codex', models: { 'gpt-6-sol': { enabled: false } } })
+  loadGptModelPolicy({ force: true })
+  assert.ok(!enabled().includes(astra))
+  syncGptIdsIntoPolicy([{ id: astra, catalog: { context_window: 12345 } }, sol, 'gpt-future', 'gpt-6-sol'])
+  assert.deepEqual(enabled(), [astra, sol])
+  assert.equal(getGptModelPolicy().models[astra].catalog.context_window, 12345)
+  saveGptModelPolicy({ models: { [astra]: { enabled: false } } })
+  saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-flare': { enabled: false } } })
+  loadGptModelPolicy({ force: true })
+  assert.deepEqual(enabled(), [sol])
+  syncGptIdsIntoPolicy([astra, 'gpt-6-sol'])
+  loadGptModelPolicy({ force: true })
+  assert.equal(getGptModelPolicy().models[astra].enabled, false)
+  assert.equal(getGptModelPolicy().models[sol], undefined)
+})

@@ -18,7 +18,8 @@ export type QualityTask = {
   enabled: boolean
   action: 'record' | 'pause'
   autoRestore: boolean
-  reasoningEffort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  reasoningEffort:
+    'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 }
 export type QualityRecord = {
   id: string

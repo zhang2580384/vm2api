@@ -219,6 +219,8 @@ const THINKING_EFFORT_BADGE_STYLES: Record<string, string> = {
   // xhigh 介于 high 与 max 之间，独立样式维持强度等级的视觉顺序。
   xhigh:
     'border-red-200 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300',
+  ultra:
+    'border-violet-300 bg-violet-100 text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-200',
   max: 'border-red-300 bg-red-100 text-red-800 dark:border-red-700 dark:bg-red-950/40 dark:text-red-200',
 }
 

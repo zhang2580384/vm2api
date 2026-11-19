@@ -1,11 +1,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { CODEX_REASONING_EFFORTS } from '../protocol/codex-convert.mjs'
 
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status })
 }
-export const QUALITY_EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh', 'max']
+export const QUALITY_EFFORTS = CODEX_REASONING_EFFORTS
 export function validateQualityTasks(tasks) {
   if (!Array.isArray(tasks) || tasks.length > 200) fail('任务数量不得超过 200')
   const ids = new Set()
