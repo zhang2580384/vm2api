@@ -66,6 +66,8 @@ jobs:
           fixture=$(mktemp -d)
           mkdir -p "$fixture/bin" "$fixture/deploy"
           cp -R src scripts test node_modules VERSION package.json "$fixture/"
+          # The gateway writes its public startup snapshot; keep that output in the container tmpfs.
+          ln -sf /tmp/gateway-v2.public.json "$fixture/src/config/gateway-v2.public.json"
           cp deploy/payload.json "$fixture/deploy/"
           cp bin/kin-codex-kernel "$fixture/bin/"
           CGO_ENABLED=0 go -C api-kernel build -o "$fixture/bin/kin-api-kernel" ./cmd/kin-api-kernel
