@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.5.0 — 2026-11-19
+
+- Codex 网关支持 `gpt-6.2-astra`、`gpt-6.2-sol` 和 `ultra` 推理强度。Responses、Chat Completions 和 Completions 支持 JSON 和 SSE，Responses 同时支持 WebSocket。
+- 两款模型加入默认目录；同步账号目录时保留管理员已有的禁用设置，显式映射到禁用型号的请求也会被拒绝。质量任务与槽位测试可选择 `ultra`。
+- 升级 Linux Codex 内核。原有 15 个固定文件中只有该内核内容变更；无数据库迁移。详见 [v2.5.0 发行说明](docs/releases/v2.5.0.md)。
+
 ## 2.4.4 — 2026-10-30
 
 - 新增 GPT 账号状态查询：使用现有 Access Token，经该槽绑定出口读取当前套餐与额度限制，无需浏览器、不调用模型；静置槽位也可显式手动查询，保持调度设置。
