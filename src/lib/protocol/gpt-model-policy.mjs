@@ -8,6 +8,11 @@ import { IMAGE_TOOL_MODELS, canonicalImageToolModel } from './image-tool-models.
 
 const SETTINGS_KEY = 'gpt_model_policy'
 
+const CODEX_62_MODELS = new Map([
+  ['gpt-6.2-astra', { display_name: 'GPT-6.2 Astra', sort: 62, capabilities: {}, params: {} }],
+  ['gpt-6.2-sol', { display_name: 'GPT-6.2 Sol', sort: 63, capabilities: {}, params: {} }],
+])
+
 const CAP_GPT = {
   context_window: 272000,
   supports_1m: false,
@@ -26,8 +31,8 @@ function entry(id, extra = {}) {
     family: 'codex',
     enabled: extra.enabled !== false,
     sort: extra.sort || 80,
-    capabilities: extra.capabilities || { ...CAP_GPT },
-    params: extra.params || { max_tokens_default: 16384, max_tokens_cap: 128000 },
+    capabilities: { ...(extra.capabilities || CAP_GPT) },
+    params: { ...(extra.params || { max_tokens_default: 16384, max_tokens_cap: 128000 }) },
     aliases: extra.aliases || [],
   }
 }
@@ -49,6 +54,7 @@ function normalizeImageTools(raw, base = null) {
 export function seedGptPolicy() {
   const models = {}
   for (const [id, extra] of [
+    ...CODEX_62_MODELS,
     ['gpt-6-sol', { display_name: 'GPT-6 Sol', sort: 70 }],
     ['gpt-6-luna', { display_name: 'GPT-6 Luna', sort: 71 }],
     ['gpt-5.6', { display_name: 'GPT-5.6', sort: 76 }],
@@ -109,8 +115,8 @@ export function getGptModelPolicy() {
 }
 
 export function saveGptModelPolicy(next) {
-  const seed = seedGptPolicy()
-  const models = { ...(seed.models || {}) }
+  const current = getGptModelPolicy()
+  const models = { ...current.models }
   if (next?.models && typeof next.models === 'object') {
     for (const [id, row] of Object.entries(next.models)) {
       if (!isGptSeriesId(id) || !row || typeof row !== 'object') continue
@@ -123,13 +129,13 @@ export function saveGptModelPolicy(next) {
   }
   const currentImageTools = policy.image_tools
   policy = {
-    ...seed,
+    ...current,
     ...next,
     models,
     image_tools: normalizeImageTools(next?.image_tools, currentImageTools),
     platform: 'openai',
     updated_at: new Date().toISOString(),
-    source: 'panel',
+    source: current.source === 'codex' ? 'codex' : 'panel',
   }
   persist()
   return policy
@@ -149,12 +155,12 @@ export function getGptPolicyCatalogIds({ enabledOnly = false } = {}) {
     .map(([id]) => id)
 }
 
-export function isGptModelEnabled(id) {
+export function isGptModelEnabled(id, { allowUnlisted = false } = {}) {
   if (!isGptSeriesId(id)) return false
   if (!loaded) loadGptModelPolicy()
-  const row = policy.models?.[id]
+  const row = policy.models?.[id] || policy.models?.[String(id).toLowerCase()]
   if (row) return row.enabled !== false
-  if (policy.source === 'codex' && Object.keys(policy.models || {}).length) return false
+  if (!allowUnlisted && policy.source === 'codex' && Object.keys(policy.models || {}).length) return false
   return true
 }
 
@@ -187,8 +193,7 @@ export function resetGptModelPolicy() {
 
 /**
  * Replace the GPT catalog with the live Codex list. Existing rows keep their edits;
- * a GPT id the policy has never seen starts disabled until the admin enables it
- * (GPT has no worker_only mode).
+ * a newly confirmed 6.2 model starts enabled. Other new ids wait for the admin.
  */
 export function syncGptIdsIntoPolicy(ids = [], { displayNameOf = null } = {}) {
   if (!loaded) loadGptModelPolicy()
@@ -211,11 +216,13 @@ export function syncGptIdsIntoPolicy(ids = [], { displayNameOf = null } = {}) {
   const added = []
   for (const row of live) {
     const prev = policy.models[row.id]
+    const known = CODEX_62_MODELS.get(row.id)
     if (!prev) added.push(row.id)
     next[row.id] = entry(row.id, {
+      ...known,
       ...prev,
-      display_name: row.display_name || prev?.display_name || displayNameOf?.(row.id) || row.id,
-      enabled: prev ? prev.enabled !== false : false,
+      display_name: row.display_name || prev?.display_name || known?.display_name || displayNameOf?.(row.id) || row.id,
+      enabled: prev ? prev.enabled !== false : !!known,
       source: 'codex',
     })
     // Upstream catalog facts replace the previous snapshot; a sync without them keeps it.

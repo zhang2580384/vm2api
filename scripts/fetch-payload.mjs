@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Slot payloads (closed-source kernels, wrap CLIs, glibc shim) live in a GitHub
- * release, not in git. deploy/payload.json pins every file by size and sha256.
+ * Slot payloads (closed-source kernels, wrap CLIs, glibc shim) live in GitHub
+ * releases, not in git. Files inherit the manifest repo and release unless they pin their own source.
  *
  *   node scripts/fetch-payload.mjs [--dest DIR]   download missing / stale files
  *   node scripts/fetch-payload.mjs --check        verify local files, no network
@@ -50,6 +50,9 @@ if (opts.pin) {
     if (buf === null) throw new Error(`${file.path} is missing; cannot pin`)
     file.size = buf.length
     file.sha256 = sha256(buf)
+    // All staged assets will be published to the same repository and tag.
+    delete file.release
+    delete file.repo
   }
   manifest.release = opts.pin
   fs.writeFileSync(opts.manifest, `${JSON.stringify(manifest, null, 2)}\n`)
@@ -77,15 +80,13 @@ if (opts.pin) {
   }
   console.log(`payload ok (${manifest.release}, ${manifest.files.length} files)`)
 } else {
-  const base = (process.env.VM2API_PAYLOAD_BASE_URL || `https://github.com/${manifest.repo}/releases/download`).replace(
-    /\/+$/,
-    '',
-  )
+  const mirror = process.env.VM2API_PAYLOAD_BASE_URL?.replace(/\/+$/, '')
   const downloads = new Map()
   for (const file of manifest.files) {
     const target = path.join(opts.dest, file.path)
     if (matches(readLocal(file), file)) continue
-    const url = `${base}/${manifest.release}/${file.asset}`
+    const base = mirror || `https://github.com/${file.repo || manifest.repo}/releases/download`
+    const url = `${base}/${file.release || manifest.release}/${file.asset}`
     if (!downloads.has(url)) {
       const res = await fetch(url)
       if (!res.ok) throw new Error(`GET ${url} -> HTTP ${res.status}`)
